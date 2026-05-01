@@ -44,6 +44,13 @@ var (
 	_DELETE      = OperationType{14, true, 15}
 	_HLL_READ    = OperationType{15, false, 16}
 	_HLL_MODIFY  = OperationType{16, true, 17}
+
+	// BSV/Teranode vendor-reserved op codes (range 200-255). Kept far above
+	// the upstream ceiling so a future upstream opcode addition cannot
+	// collide with this fork's wire contract. Match the server-private
+	// repo's as/include/base/proto.h definitions.
+	_TERANODE_MODIFY = OperationType{200, true, 18}
+	_TERANODE_READ   = OperationType{201, false, 19}
 )
 
 // Operation contains operation definition.
