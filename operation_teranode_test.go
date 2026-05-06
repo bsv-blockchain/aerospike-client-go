@@ -54,6 +54,99 @@ func TestTeranodeReadOpWireBytes(t *testing.T) {
 	}
 }
 
+// TestTeranodeReadOpRoutesAsRead confirms that an operate request
+// containing TeranodeReadOp does NOT get classified as a write by
+// newOperateArgs. Without an explicit case for _TERANODE_READ in the
+// operation-type switch, the read op falls into the default branch,
+// sets _INFO2_WRITE / hasWrite=true, and routes via PartitionForWrite
+// — a real bug surfaced by the PR review on the initial commit.
+func TestTeranodeReadOpRoutesAsRead(t *testing.T) {
+	key, err := NewKey("ns", "set", "key")
+	if err != nil {
+		t.Fatalf("NewKey: %v", err)
+	}
+
+	args, oerr := newOperateArgs(
+		nil, // cluster nil — the partition lookup is guarded
+		NewWritePolicy(0, 0),
+		key,
+		[]*Operation{TeranodeReadOp("anyBin", []byte{0xc0})},
+	)
+	if oerr != nil {
+		t.Fatalf("newOperateArgs: %v", oerr)
+	}
+
+	if args.hasWrite {
+		t.Errorf("TeranodeReadOp got classified as a write (hasWrite=true)")
+	}
+	if args.readAttr&_INFO1_READ == 0 {
+		t.Errorf("TeranodeReadOp didn't set _INFO1_READ (readAttr=0x%x)", args.readAttr)
+	}
+	if args.writeAttr&_INFO2_WRITE != 0 {
+		t.Errorf("TeranodeReadOp wrongly set _INFO2_WRITE (writeAttr=0x%x)", args.writeAttr)
+	}
+}
+
+// TestTeranodeModifyOpRoutesAsWrite is the symmetric check —
+// TeranodeModifyOp must classify as a write so the request takes the
+// PartitionForWrite path and the wire header has _INFO2_WRITE.
+func TestTeranodeModifyOpRoutesAsWrite(t *testing.T) {
+	key, err := NewKey("ns", "set", "key")
+	if err != nil {
+		t.Fatalf("NewKey: %v", err)
+	}
+
+	args, oerr := newOperateArgs(
+		nil,
+		NewWritePolicy(0, 0),
+		key,
+		[]*Operation{TeranodeModifyOp("anyBin", []byte{0x90})},
+	)
+	if oerr != nil {
+		t.Fatalf("newOperateArgs: %v", oerr)
+	}
+
+	if !args.hasWrite {
+		t.Errorf("TeranodeModifyOp didn't classify as a write (hasWrite=false)")
+	}
+	if args.writeAttr&_INFO2_WRITE == 0 {
+		t.Errorf("TeranodeModifyOp didn't set _INFO2_WRITE (writeAttr=0x%x)", args.writeAttr)
+	}
+}
+
+// TestTeranodeReadOpInMixedBatch confirms that when a batch contains
+// both a TeranodeReadOp and a write op, the batch attr correctly sets
+// _INFO1_READ on the read side. Without the fix, the read in the
+// batch silently drops to the default (no-read) branch, so the wire
+// header doesn't request bin data back.
+func TestTeranodeReadOpInMixedBatch(t *testing.T) {
+	ba := &batchAttr{}
+	ba.adjustWrite([]*Operation{
+		TeranodeModifyOp("modifyBin", []byte{0x90}),
+		TeranodeReadOp("readBin", []byte{0xc0}),
+	})
+
+	if ba.readAttr&_INFO1_READ == 0 {
+		t.Errorf("mixed batch with TeranodeReadOp didn't set _INFO1_READ "+
+			"(readAttr=0x%x)", ba.readAttr)
+	}
+}
+
+// TestTeranodeReadOpInBatchAttrNew exercises the matching switch in
+// newBatchAttrOps (the constructor path used by BatchOperate).
+func TestTeranodeReadOpInBatchAttrNew(t *testing.T) {
+	ba := newBatchAttrOps(
+		NewBatchPolicy(),
+		NewBatchWritePolicy(),
+		[]*Operation{TeranodeReadOp("readBin", []byte{0xc0})},
+	)
+
+	if ba.readAttr&_INFO1_READ == 0 {
+		t.Errorf("newBatchAttrOps with TeranodeReadOp didn't set _INFO1_READ "+
+			"(readAttr=0x%x)", ba.readAttr)
+	}
+}
+
 // TestTeranodeOpEnumDistUnique guards against accidentally giving the
 // new ops the same enumDist as an existing OperationType, which would
 // break upstream's enum-distinction trick.
