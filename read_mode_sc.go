@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strconv"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
 )
 
 // ReadModeSC is the read policy in SC (strong consistency) mode namespaces.

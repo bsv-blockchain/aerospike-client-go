@@ -24,12 +24,12 @@ import (
 	"strings"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
-	registry "github.com/aerospike/aerospike-client-go/v8/config/registry"
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	ast "github.com/aerospike/aerospike-client-go/v8/types"
-	asub "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
+	registry "github.com/bsv-blockchain/aerospike-client-go/v8/config/registry"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	ast "github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	asub "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 
 	gg "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"

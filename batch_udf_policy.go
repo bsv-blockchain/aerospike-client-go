@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/logger"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 
 // BatchUDFPolicy attributes used in batch UDF execute commands.
 type BatchUDFPolicy struct {

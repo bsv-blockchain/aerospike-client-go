@@ -17,7 +17,7 @@ package histogram_test
 import (
 	"testing"
 
-	"github.com/aerospike/aerospike-client-go/v8/types/histogram"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types/histogram"
 )
 
 var (

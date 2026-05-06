@@ -27,10 +27,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/aerospike/aerospike-client-go/v8/config/provider"
-	internal "github.com/aerospike/aerospike-client-go/v8/internal/version"
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	_ "github.com/bsv-blockchain/aerospike-client-go/v8/config/provider"
+	internal "github.com/bsv-blockchain/aerospike-client-go/v8/internal/version"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 const unreachable = "UNREACHABLE"

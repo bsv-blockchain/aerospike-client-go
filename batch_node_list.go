@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/types"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/types"
 
 func newBatchNodeList(cluster *Cluster, policy *BatchPolicy, keys []*Key, records []*BatchRecord, hasWrite bool) ([]*batchNode, Error) {
 	nodes := cluster.GetNodes()

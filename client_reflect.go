@@ -19,7 +19,7 @@ package aerospike
 import (
 	"reflect"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // PutObject writes record bin(s) to the server.

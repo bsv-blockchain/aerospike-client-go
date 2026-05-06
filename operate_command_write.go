@@ -17,7 +17,7 @@ package aerospike
 import (
 	"iter"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 type operateCommandWrite struct {

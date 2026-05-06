@@ -32,9 +32,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
-	asl "github.com/aerospike/aerospike-client-go/v8/logger"
-	ast "github.com/aerospike/aerospike-client-go/v8/types"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
+	asl "github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	ast "github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // TStats is a goroutine's statistics values

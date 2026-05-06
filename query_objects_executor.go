@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 	"golang.org/x/sync/semaphore"
 )
 

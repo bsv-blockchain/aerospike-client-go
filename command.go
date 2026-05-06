@@ -23,12 +23,12 @@ import (
 	"iter"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	"github.com/aerospike/aerospike-client-go/v8/types/pool"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types/pool"
 
-	ParticleType "github.com/aerospike/aerospike-client-go/v8/types/particle_type"
-	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	ParticleType "github.com/bsv-blockchain/aerospike-client-go/v8/types/particle_type"
+	Buffer "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 )
 
 const (

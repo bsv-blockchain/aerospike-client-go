@@ -19,7 +19,7 @@ import (
 	"iter"
 	"time"
 
-	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	Buffer "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 )
 
 type singleCommand struct {

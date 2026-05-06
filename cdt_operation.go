@@ -16,7 +16,7 @@
 package aerospike
 
 import (
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 type SelectFlag int

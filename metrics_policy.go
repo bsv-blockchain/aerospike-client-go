@@ -17,9 +17,9 @@ package aerospike
 import (
 	"strings"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types/histogram"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types/histogram"
 )
 
 // MetricsPolicy specifies client periodic metrics configuration.

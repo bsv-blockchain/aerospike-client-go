@@ -18,7 +18,7 @@ import (
 	"iter"
 	"reflect"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 type baseReadCommand struct {

@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // Statement encapsulates query statement parameters.

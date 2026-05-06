@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/logger"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 
 // BatchWritePolicy attributes used in batch write commands.
 type BatchWritePolicy struct {

@@ -25,14 +25,14 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	iatomic "github.com/aerospike/aerospike-client-go/v8/internal/atomic"
-	sm "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
-	"github.com/aerospike/aerospike-client-go/v8/internal/seq"
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	iatomic "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
+	sm "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic/map"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/internal/seq"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
-const aesModule = "github.com/aerospike/aerospike-client-go/v8"
+const aesModule = "github.com/bsv-blockchain/aerospike-client-go/v8"
 
 // Cluster encapsulates the aerospike cluster nodes and manages
 // them.

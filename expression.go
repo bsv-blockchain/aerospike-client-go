@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	ParticleType "github.com/aerospike/aerospike-client-go/v8/types/particle_type"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	ParticleType "github.com/bsv-blockchain/aerospike-client-go/v8/types/particle_type"
 )
 
 // ExpressionArgument is used for passing arguments to filter expressions.

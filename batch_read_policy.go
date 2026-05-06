@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/logger"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 
 // BatchReadPolicy attributes used in batch read commands.
 type BatchReadPolicy struct {

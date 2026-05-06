@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // Specifies if stack traces should be included in the error.

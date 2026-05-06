@@ -18,7 +18,7 @@ import (
 	"crypto/tls"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 )
 
 // ClientPolicy encapsulates parameters for client policy command.

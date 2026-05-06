@@ -20,7 +20,7 @@ package aerospike
 import (
 	"fmt"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
 )
 
 // QueryDuration defines the expected query duration. The server treats the query in different ways depending on the expected duration.

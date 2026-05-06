@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/internal/version"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/internal/version"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // IndexTask is used to poll for long running create index completion.

@@ -18,7 +18,7 @@ import (
 	"runtime"
 	"sync"
 
-	atomicmap "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
+	atomicmap "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic/map"
 
 	gg "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"
