@@ -20,11 +20,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 
-	iatomic "github.com/aerospike/aerospike-client-go/v8/internal/atomic"
-	amap "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
-	hist "github.com/aerospike/aerospike-client-go/v8/types/histogram"
+	iatomic "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
+	amap "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic/map"
+	hist "github.com/bsv-blockchain/aerospike-client-go/v8/types/histogram"
 )
 
 type detailedMetricsArray = [ttMaxCommandTypes]atomic.Pointer[commandMetric]

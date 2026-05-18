@@ -24,9 +24,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
-	registry "github.com/aerospike/aerospike-client-go/v8/config/registry"
-	"github.com/aerospike/aerospike-client-go/v8/logger"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
+	registry "github.com/bsv-blockchain/aerospike-client-go/v8/config/registry"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 )
 
 var supportedVersions = map[string]struct{}{

@@ -18,7 +18,7 @@ import (
 	"crypto/tls"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 )
 
 // ClientPolicy encapsulates parameters for client policy command.
@@ -189,6 +189,16 @@ type ClientPolicy struct {
 
 	// Determianes the interval for checking for configuration changes using configProvider.
 	ConfigInterval time.Duration // = 5 second
+
+	// MetricsPolicy enables client-side metrics for the lifetime of the cluster
+	// when set to a non-nil value. If nil (the default) metrics are disabled.
+	//
+	// In this fork the metrics gate is a plain bool, not an atomic, for hot-path
+	// performance. EnableMetrics/DisableMetrics may still be called at runtime
+	// for backwards compatibility, but doing so concurrently with in-flight
+	// commands is racy and is intentionally not safe — set this once before
+	// any commands are issued, or never call the toggles at all after startup.
+	MetricsPolicy *MetricsPolicy // = nil
 }
 
 // NewClientPolicy generates a new ClientPolicy with default values.

@@ -1,4 +1,4 @@
-module github.com/aerospike/aerospike-client-go/v8
+module github.com/bsv-blockchain/aerospike-client-go/v8
 
 go 1.23.0
 

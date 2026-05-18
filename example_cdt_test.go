@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"log"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
 )
 
 // ExampleListAppendOp demonstrates appending items to a list bin.

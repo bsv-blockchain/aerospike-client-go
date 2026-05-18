@@ -48,7 +48,7 @@ func newOperateArgs(
 			respondAllOps = true
 			// Fall through to read.
 			fallthrough
-		case _CDT_READ, _READ:
+		case _CDT_READ, _READ, _TERANODE_READ:
 			rattr |= _INFO1_READ
 
 			// Read all bins if no bin is specified.

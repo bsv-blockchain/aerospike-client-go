@@ -17,8 +17,8 @@ package aerospike
 import (
 	"iter"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	Buffer "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 )
 
 type batchCommandExists struct {
@@ -111,7 +111,7 @@ func (cmd *batchCommandExists) parseRecordResults(ifc command, receiveSize int) 
 		}
 
 		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled.Load()
+		metricsEnabled := cmd.node.cluster.metricsEnabled
 		if metricsEnabled {
 			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
 		}

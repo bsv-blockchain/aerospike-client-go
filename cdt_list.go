@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/types"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/types"
 
 // List operations support negative indexing. If the index is negative, the
 // resolved index starts backwards from end of list. If an index is out of bounds,

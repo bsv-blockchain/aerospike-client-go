@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
-	"github.com/aerospike/aerospike-client-go/v8/internal/version"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/internal/version"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 	gg "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"
 )

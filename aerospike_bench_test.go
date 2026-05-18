@@ -17,7 +17,7 @@ package aerospike_test
 import (
 	"runtime"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
 
 	"testing"
 )

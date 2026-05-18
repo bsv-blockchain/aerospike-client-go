@@ -15,7 +15,7 @@
 package aerospike_test
 
 import (
-	as "github.com/aerospike/aerospike-client-go/v8"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
 
 	gg "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"

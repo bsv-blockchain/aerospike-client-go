@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 
-	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	Buffer "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -65,7 +65,7 @@ func (cmd *queryAggregateCommand) parseRecordResults(ifc command, receiveSize in
 		resultCode := types.ResultCode(cmd.dataBuffer[5] & 0xFF)
 
 		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled.Load()
+		metricsEnabled := cmd.node.cluster.metricsEnabled
 		if metricsEnabled {
 			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
 		}

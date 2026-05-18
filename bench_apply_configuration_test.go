@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
 )
 
 func BenchmarkApplyConfigToClientPolicy(b *testing.B) {

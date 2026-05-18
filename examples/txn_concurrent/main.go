@@ -24,8 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
-	shared "github.com/aerospike/aerospike-client-go/v8/examples/shared"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
+	shared "github.com/bsv-blockchain/aerospike-client-go/v8/examples/shared"
 )
 
 const (

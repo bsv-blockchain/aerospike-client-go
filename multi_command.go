@@ -21,8 +21,8 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	Buffer "github.com/bsv-blockchain/aerospike-client-go/v8/utils/buffer"
 )
 
 type baseMultiCommand struct {
@@ -348,7 +348,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 		resultCode := types.ResultCode(cmd.dataBuffer[5] & 0xFF)
 
 		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled.Load()
+		metricsEnabled := cmd.node.cluster.metricsEnabled
 		if metricsEnabled {
 			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), ifc.commandType(), resultCode)
 		}

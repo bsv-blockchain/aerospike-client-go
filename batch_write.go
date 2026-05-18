@@ -14,7 +14,7 @@
 
 package aerospike
 
-import "github.com/aerospike/aerospike-client-go/v8/types"
+import "github.com/bsv-blockchain/aerospike-client-go/v8/types"
 
 var _ BatchRecordIfc = &BatchWrite{}
 

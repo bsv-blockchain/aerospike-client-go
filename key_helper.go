@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/aerospike/aerospike-client-go/v8/pkg/ripemd160"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/pkg/ripemd160"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 type keyWriter struct {

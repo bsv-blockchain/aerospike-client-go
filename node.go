@@ -24,10 +24,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	iatomic "github.com/aerospike/aerospike-client-go/v8/internal/atomic"
-	"github.com/aerospike/aerospike-client-go/v8/internal/version"
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	iatomic "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/internal/version"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 const (

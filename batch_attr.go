@@ -57,7 +57,7 @@ func newBatchAttrOps(rp *BatchPolicy, wp *BatchWritePolicy, ops []*Operation) *b
 		case _READ_HEADER:
 			readHeader = true
 			hasRead = true
-		case _BIT_READ, _EXP_READ, _HLL_READ, _MAP_READ, _CDT_READ, _READ:
+		case _BIT_READ, _EXP_READ, _HLL_READ, _MAP_READ, _CDT_READ, _READ, _TERANODE_READ:
 			// _Read all bins if no bin is specified.
 			if op.binName == "" {
 				readAllBins = true
@@ -231,7 +231,7 @@ func (ba *batchAttr) adjustWrite(ops []*Operation) {
 		case _READ_HEADER:
 			readHeader = true
 			hasRead = true
-		case _BIT_READ, _EXP_READ, _HLL_READ, _MAP_READ, _CDT_READ, _READ:
+		case _BIT_READ, _EXP_READ, _HLL_READ, _MAP_READ, _CDT_READ, _READ, _TERANODE_READ:
 			// _Read all bins if no bin is specified.
 			if op.binName == "" {
 				readAllBins = true

@@ -3,7 +3,7 @@ package aerospike
 import (
 	"testing"
 
-	amap "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
+	amap "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic/map"
 )
 
 func BenchmarkCloneMap(b *testing.B) {

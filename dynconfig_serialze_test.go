@@ -19,7 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
 	gg "github.com/onsi/ginkgo/v2"
 	gm "github.com/onsi/gomega"
 )

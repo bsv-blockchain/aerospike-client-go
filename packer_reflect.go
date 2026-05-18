@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 func init() {

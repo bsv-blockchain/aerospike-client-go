@@ -17,7 +17,7 @@ package aerospike
 import (
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 )
 
 // BatchPolicy encapsulates parameters for policy attributes used in write operations.

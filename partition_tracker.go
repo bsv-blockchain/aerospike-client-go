@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	atmc "github.com/aerospike/aerospike-client-go/v8/internal/atomic"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	atmc "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 type partitionTracker struct {

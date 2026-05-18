@@ -15,8 +15,8 @@
 package configregistry
 
 import (
-	dynconfig "github.com/aerospike/aerospike-client-go/v8/config"
-	atomic "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
+	dynconfig "github.com/bsv-blockchain/aerospike-client-go/v8/config"
+	atomic "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic/map"
 )
 
 const (

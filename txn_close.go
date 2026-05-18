@@ -17,7 +17,7 @@ package aerospike
 import (
 	"iter"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // guarantee txnCloseCommand implements command interface
@@ -59,7 +59,7 @@ func (cmd *txnCloseCommand) parseResult(ifc command, conn *Connection) Error {
 	}
 
 	// Aggregate metrics
-	metricsEnabled := cmd.node.cluster.metricsEnabled.Load()
+	metricsEnabled := cmd.node.cluster.metricsEnabled
 	if metricsEnabled {
 		cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
 	}

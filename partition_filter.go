@@ -21,7 +21,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
 
 // PartitionFilter is used in scan/queries. This filter is also used as a cursor.

@@ -21,8 +21,8 @@ import (
 	"runtime"
 	"strings"
 
-	as "github.com/aerospike/aerospike-client-go/v8"
-	asl "github.com/aerospike/aerospike-client-go/v8/logger"
+	as "github.com/bsv-blockchain/aerospike-client-go/v8"
+	asl "github.com/bsv-blockchain/aerospike-client-go/v8/logger"
 )
 
 // flag information

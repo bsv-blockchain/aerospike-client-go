@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8/logger"
-	"github.com/aerospike/aerospike-client-go/v8/types"
-	"github.com/aerospike/aerospike-client-go/v8/types/histogram"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/logger"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types/histogram"
 )
 
 const _BUFF_ADJUST_INTERVAL = 5 * time.Second
