@@ -1873,9 +1873,11 @@ func newExpression(e any) *Expression {
 			packer := newPacker()
 			_, err := packObject(packer, e, false)
 			if err != nil {
+				packer.Buffer.Reset()
+				packerPool.Put(packer)
 				panic(err)
 			}
-			return &Expression{bytes: packer.Bytes()}
+			return &Expression{bytes: packer.BytesAndPut()}
 		}
 		return ExpListValueVal(v)
 	case map[string]any:
@@ -1887,9 +1889,11 @@ func newExpression(e any) *Expression {
 		packer := newPacker()
 		_, err := packObject(packer, e, false)
 		if err != nil {
+			packer.Buffer.Reset()
+			packerPool.Put(packer)
 			panic(newError(types.TYPE_NOT_SUPPORTED, fmt.Sprintf("Expression type '%v' (%s) not supported: %v", e, reflect.TypeOf(e).String(), err)))
 		}
-		return &Expression{bytes: packer.Bytes()}
+		return &Expression{bytes: packer.BytesAndPut()}
 	}
 }
 

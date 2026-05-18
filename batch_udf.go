@@ -117,10 +117,15 @@ func (bu *BatchUDF) size(parentPolicy *BasePolicy) (int, Error) {
 	packer := newPacker()
 	sz, err := packValueArray(packer, bu.FunctionArgs)
 	if err != nil {
+		// Return the pooled packer on the error path too.
+		packer.Buffer.Reset()
+		packerPool.Put(packer)
 		return -1, err
 	}
 
-	bu.argBytes = packer.Bytes()
+	// Copy out and release the packer in one step so the returned slice
+	// is safe to hold beyond the pool round-trip.
+	bu.argBytes = packer.BytesAndPut()
 
 	size += sz + int(_FIELD_HEADER_SIZE)
 	return size, nil

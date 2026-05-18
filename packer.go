@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
@@ -616,8 +617,50 @@ type packer struct {
 	tempBuffer [8]byte
 }
 
+// packerPool recycles *packer instances across calls so the embedded
+// bytes.Buffer's underlying array is reused instead of being allocated
+// fresh on every newPacker(). At high call rates (e.g. setMined marking
+// 600M+ records per block) the cumulative bytes.Buffer.grow churn is a
+// dominant allocator; pooling eliminates it.
+//
+// Safe pool reuse requires that the caller never aliases the result of
+// packer.Bytes() once the packer is returned: a subsequent Get + Reset
+// + Write would overwrite the bytes the previous caller is still
+// holding. The pool is therefore consumed exclusively through
+// BytesAndPut, which copies and releases atomically. Direct callers
+// that still want the legacy alias-then-throw-away semantics can use
+// newPacker without pooling by going through packer{} construction
+// directly — but no in-tree caller needs that.
+var packerPool = sync.Pool{
+	New: func() interface{} { return &packer{} },
+}
+
 func newPacker() *packer {
-	return &packer{}
+	p := packerPool.Get().(*packer)
+	// Defensive: the pool invariant is that maps are Reset before being
+	// Put. Reset again here so a misbehaving caller cannot leak state
+	// into the next user.
+	p.Buffer.Reset()
+	return p
+}
+
+// BytesAndPut returns a freshly-allocated copy of the packer's contents
+// and returns the packer to the pool. After this call the receiver must
+// not be used; the returned slice owns its own backing array and is
+// safe to hold beyond the pool round-trip.
+//
+// Use this method instead of p.Bytes() at any call site that stores
+// the result in a longer-lived structure (BatchUDF.argBytes,
+// Expression.bytes, etc.). Aliasing p.Bytes() into a long-lived field
+// is unsafe with pooling because the next pool user will Reset and
+// overwrite the same underlying array.
+func (vb *packer) BytesAndPut() []byte {
+	src := vb.Buffer.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	vb.Buffer.Reset()
+	packerPool.Put(vb)
+	return out
 }
 
 // WriteInt64 writes an int64 to the buffer
