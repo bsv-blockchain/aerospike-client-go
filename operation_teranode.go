@@ -36,6 +36,20 @@ func TeranodeModifyOp(binName string, payload []byte) *Operation {
 // TeranodeReadOp is the read-side counterpart of TeranodeModifyOp. The
 // server currently has no read-side sub-ops defined; this constructor
 // is provided for forward compatibility once any are added.
+//
+// binName must be non-empty. Unlike _READ, an empty binName does not
+// imply "all bins" for a Teranode op — the server dispatches by
+// sub_op_id, not by bin enumeration, and writes the result back to the
+// named bin. batchAttr.adjustRead therefore deliberately does not set
+// _INFO1_GET_ALL for an empty-binName TeranodeReadOp.
+//
+// TeranodeReadOp is not classified as a "basic read" by
+// OperationType.isBasicRead(), so the client-side check in command.go
+// rejects it inside secondary-index query projections when the target
+// server is older than 8.1.2 ("Only basic read operations are supported
+// for query operations projection..."). The BSV server fork post-dates
+// 8.1.2, so this is not a constraint inside the Teranode dispatch path
+// — flagged only for reuse outside it.
 func TeranodeReadOp(binName string, payload []byte) *Operation {
 	return &Operation{
 		opType:   _TERANODE_READ,
