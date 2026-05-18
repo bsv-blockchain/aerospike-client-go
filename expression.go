@@ -1873,8 +1873,7 @@ func newExpression(e any) *Expression {
 			packer := newPacker()
 			_, err := packObject(packer, e, false)
 			if err != nil {
-				packer.Buffer.Reset()
-				packerPool.Put(packer)
+				packer.release()
 				panic(err)
 			}
 			return &Expression{bytes: packer.BytesAndPut()}
@@ -1889,8 +1888,7 @@ func newExpression(e any) *Expression {
 		packer := newPacker()
 		_, err := packObject(packer, e, false)
 		if err != nil {
-			packer.Buffer.Reset()
-			packerPool.Put(packer)
+			packer.release()
 			panic(newError(types.TYPE_NOT_SUPPORTED, fmt.Sprintf("Expression type '%v' (%s) not supported: %v", e, reflect.TypeOf(e).String(), err)))
 		}
 		return &Expression{bytes: packer.BytesAndPut()}

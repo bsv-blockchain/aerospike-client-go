@@ -626,22 +626,46 @@ type packer struct {
 // Safe pool reuse requires that the caller never aliases the result of
 // packer.Bytes() once the packer is returned: a subsequent Get + Reset
 // + Write would overwrite the bytes the previous caller is still
-// holding. The pool is therefore consumed exclusively through
-// BytesAndPut, which copies and releases atomically. Direct callers
-// that still want the legacy alias-then-throw-away semantics can use
-// newPacker without pooling by going through packer{} construction
-// directly — but no in-tree caller needs that.
+// holding. The two legitimate release paths are BytesAndPut (on the
+// success path, copies the packed bytes into a fresh slice and then
+// releases) and release (on error paths where no bytes are needed).
+// Both route through (*packer).release, which enforces the pool
+// invariant (Reset before Put) and bounds steady-state memory by
+// discarding rather than re-pooling packers whose Buffer has grown
+// past maxPooledPackerBufCap.
 var packerPool = sync.Pool{
 	New: func() interface{} { return &packer{} },
 }
 
+// maxPooledPackerBufCap caps the bytes.Buffer capacity that we are
+// willing to retain in the pool. A single very large pack would
+// otherwise promote a P-local pool slot to that maximum and hold it
+// indefinitely (sync.Pool only sheds entries on a GC cycle). 64 KiB
+// comfortably covers normal UDF arg / expression payloads and bounds
+// the worst-case steady-state pool footprint at one such buffer per P.
+const maxPooledPackerBufCap = 64 * 1024
+
 func newPacker() *packer {
 	p := packerPool.Get().(*packer)
-	// Defensive: the pool invariant is that maps are Reset before being
-	// Put. Reset again here so a misbehaving caller cannot leak state
-	// into the next user.
+	// Defensive: release() is supposed to Reset before Put, but a
+	// future caller could forget. Reset again here so a misbehaving
+	// release path cannot leak Buffer contents into the next user.
 	p.Buffer.Reset()
 	return p
+}
+
+// release returns the packer to the pool after Reset, unless its
+// Buffer has grown past maxPooledPackerBufCap (in which case the
+// packer is dropped on the floor and a fresh one will be allocated
+// on the next newPacker call). All release paths -- BytesAndPut on
+// success, callers on error paths -- must go through this method
+// so the pool invariant stays encapsulated in packer.go.
+func (vb *packer) release() {
+	if vb.Buffer.Cap() > maxPooledPackerBufCap {
+		return
+	}
+	vb.Buffer.Reset()
+	packerPool.Put(vb)
 }
 
 // BytesAndPut returns a freshly-allocated copy of the packer's contents
@@ -658,8 +682,7 @@ func (vb *packer) BytesAndPut() []byte {
 	src := vb.Buffer.Bytes()
 	out := make([]byte, len(src))
 	copy(out, src)
-	vb.Buffer.Reset()
-	packerPool.Put(vb)
+	vb.release()
 	return out
 }
 

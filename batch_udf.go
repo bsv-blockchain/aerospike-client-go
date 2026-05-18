@@ -117,9 +117,7 @@ func (bu *BatchUDF) size(parentPolicy *BasePolicy) (int, Error) {
 	packer := newPacker()
 	sz, err := packValueArray(packer, bu.FunctionArgs)
 	if err != nil {
-		// Return the pooled packer on the error path too.
-		packer.Buffer.Reset()
-		packerPool.Put(packer)
+		packer.release()
 		return -1, err
 	}
 

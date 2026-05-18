@@ -31,9 +31,12 @@ func TestPackerPool_RoundTrip(t *testing.T) {
 		}
 	}
 
-	// Second user. If the pool handed us p1 back, its Buffer was Reset()
-	// so any new writes start fresh; we should not see any of p1's
-	// previous bytes in the new Bytes() output.
+	// Second user. sync.Pool does not guarantee that p2 receives the
+	// same *packer as p1 -- on a multi-P runtime the next Get may
+	// draw from a different P-local cache or a fresh New. So this
+	// loop probabilistically (but not deterministically) exercises
+	// the same-slot reuse path. The deterministic safety check is
+	// TestPackerPool_BytesAndPutOwnsBackingArray below.
 	p2 := newPacker()
 	for i := 0; i < 50; i++ {
 		p2.WriteByte(byte(200 - i))
@@ -48,13 +51,37 @@ func TestPackerPool_RoundTrip(t *testing.T) {
 		}
 	}
 
-	// Critically: out1 must still contain its original bytes even after
-	// p2 reused the pool. If BytesAndPut had aliased Buffer.Bytes
-	// instead of copying, out1 would be partially overwritten with
-	// out2's contents.
+	// out1 must still contain its original bytes even after p2 ran.
+	// If BytesAndPut had aliased Buffer.Bytes instead of copying, AND
+	// p2 happened to draw p1 from the pool, out1 would be partially
+	// overwritten. (See the deterministic test below for the copy
+	// invariant on its own.)
 	for i := 0; i < 100; i++ {
 		if out1[i] != byte(i) {
 			t.Fatalf("out1[%d] corrupted after pool reuse: got %d, want %d", i, out1[i], i)
+		}
+	}
+}
+
+// TestPackerPool_BytesAndPutOwnsBackingArray verifies the BytesAndPut
+// copy contract directly, without relying on sync.Pool reuse semantics:
+// the returned slice must point at a different backing array than the
+// packer's internal Buffer, so a subsequent Reset+Write on the same
+// (released) packer cannot mutate it.
+func TestPackerPool_BytesAndPutOwnsBackingArray(t *testing.T) {
+	p := &packer{}
+	for i := 0; i < 64; i++ {
+		p.WriteByte(byte(i))
+	}
+	internal := p.Buffer.Bytes()
+	out := p.BytesAndPut()
+
+	if len(internal) > 0 && len(out) > 0 && &internal[0] == &out[0] {
+		t.Fatal("BytesAndPut returned a slice aliasing the packer's internal buffer")
+	}
+	for i := 0; i < 64; i++ {
+		if out[i] != byte(i) {
+			t.Fatalf("out[%d] = %d, want %d", i, out[i], i)
 		}
 	}
 }
