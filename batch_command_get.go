@@ -146,10 +146,19 @@ func (cmd *batchCommandGet) parseRecordResults(ifc command, receiveSize int) (bo
 			return false, nil
 		}
 
-		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled
-		if metricsEnabled {
-			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
+		// Aggregate metrics against this record's own namespace (issue #1001).
+		if cmd.node.cluster.metricsEnabled {
+			var ns string
+			if cmd.indexRecords != nil {
+				if len(cmd.indexRecords) > 0 {
+					ns = cmd.indexRecords[batchIndex].Key.namespace
+				}
+			} else {
+				ns = cmd.keys[batchIndex].namespace
+			}
+			if ns != "" {
+				cmd.node.stats.incResultCode(ns, cmd.commandType(), resultCode)
+			}
 		}
 
 		var err Error

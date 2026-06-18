@@ -89,11 +89,6 @@ func (cmd *txnBatchVerifyCommand) parseRecordResults(ifc command, receiveSize in
 		}
 		resultCode := types.ResultCode(cmd.dataBuffer[5] & 0xFF)
 
-		metricsEnabled := cmd.node.cluster.metricsEnabled
-		if metricsEnabled {
-			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
-		}
-
 		// The only valid server return codes are "ok" and "not found" and "filtered out".
 		// If other return codes are received, then abort the batch.
 		if resultCode != 0 && resultCode != types.KEY_NOT_FOUND_ERROR {
@@ -119,6 +114,11 @@ func (cmd *txnBatchVerifyCommand) parseRecordResults(ifc command, receiveSize in
 		err := cmd.skipKey(fieldCount)
 		if err != nil {
 			return false, err
+		}
+
+		// Aggregate metrics against this record's own namespace (issue #1001).
+		if cmd.node.cluster.metricsEnabled {
+			cmd.node.stats.incResultCode(cmd.keys[batchIndex].namespace, cmd.commandType(), resultCode)
 		}
 
 		record := cmd.records[batchIndex]

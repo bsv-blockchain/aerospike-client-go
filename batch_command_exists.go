@@ -110,10 +110,9 @@ func (cmd *batchCommandExists) parseRecordResults(ifc command, receiveSize int) 
 			return false, nil
 		}
 
-		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled
-		if metricsEnabled {
-			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
+		// Aggregate metrics against this record's own namespace (issue #1001).
+		if cmd.node.cluster.metricsEnabled && len(cmd.keys) > batchIndex {
+			cmd.node.stats.incResultCode(cmd.keys[batchIndex].namespace, cmd.commandType(), resultCode)
 		}
 
 		if opCount > 0 {

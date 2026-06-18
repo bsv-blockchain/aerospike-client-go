@@ -104,10 +104,9 @@ func (cmd *batchCommandUDF) parseRecordResults(ifc command, receiveSize int) (bo
 			return false, err
 		}
 
-		// Aggregate metrics
-		metricsEnabled := cmd.node.cluster.metricsEnabled
-		if metricsEnabled {
-			cmd.node.stats.updateOrInsert(cmd.getNamespace(), cmd.getNamespaces(), cmd.commandType(), resultCode)
+		// Aggregate metrics against this record's own namespace (issue #1001).
+		if cmd.node.cluster.metricsEnabled {
+			cmd.node.stats.incResultCode(cmd.keys[batchIndex].namespace, cmd.commandType(), resultCode)
 		}
 
 		// The only valid server return codes are "ok" and "not found" and "filtered out".
