@@ -104,11 +104,6 @@ func (cmd *batchCommandUDF) parseRecordResults(ifc command, receiveSize int) (bo
 			return false, err
 		}
 
-		// Aggregate metrics against this record's own namespace (issue #1001).
-		if cmd.node.cluster.metricsEnabled {
-			cmd.node.stats.incResultCode(cmd.keys[batchIndex].namespace, cmd.commandType(), resultCode)
-		}
-
 		// The only valid server return codes are "ok" and "not found" and "filtered out".
 		// If other return codes are received, then abort the batch.
 		if resultCode != 0 {
@@ -128,6 +123,11 @@ func (cmd *batchCommandUDF) parseRecordResults(ifc command, receiveSize int) (bo
 		// If cmd is the end marker of the response, do not proceed further
 		if (info3 & _INFO3_LAST) == _INFO3_LAST {
 			return false, nil
+		}
+
+		// Aggregate metrics against this record's own namespace (issue #1001).
+		if cmd.node.cluster.metricsEnabled {
+			cmd.node.stats.incResultCode(cmd.keys[batchIndex].namespace, cmd.commandType(), resultCode)
 		}
 
 		if resultCode == 0 {

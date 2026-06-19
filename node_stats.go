@@ -787,7 +787,7 @@ func (n *nodeStats) reshapeDetailedResultCodeCounts() {
 	})
 }
 
-// updateOrInsert updates result code counts (lock-free).
+// updateOrInsert updates result code counts.
 // A non-nil namespace records against that single namespace; otherwise it
 // records once per namespace yielded by the iterator (whole-command events).
 func (n *nodeStats) updateOrInsert(namespace *string, namespaces iter.Seq2[string, uint64], ct commandType, resultCode types.ResultCode) {
