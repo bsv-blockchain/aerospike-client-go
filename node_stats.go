@@ -787,25 +787,26 @@ func (n *nodeStats) reshapeDetailedResultCodeCounts() {
 	})
 }
 
-// updateOrInsert updates result code counts (lock-free)
+// updateOrInsert updates result code counts.
+// A non-nil namespace records against that single namespace; otherwise it
+// records once per namespace yielded by the iterator (whole-command events).
 func (n *nodeStats) updateOrInsert(namespace *string, namespaces iter.Seq2[string, uint64], ct commandType, resultCode types.ResultCode) {
 	if namespace != nil {
-		arr := n.getOrCreateResultCodeArray(*namespace)
-		m := n.getOrCreateResultCodeMetric(arr, ct, resultCode)
-		if cur := m.ResultCodeCounts.Get(resultCode); cur > 0 {
-			m.ResultCodeCounts.Set(resultCode, cur+1)
-		} else {
-			m.ResultCodeCounts.Set(resultCode, 1)
-		}
+		n.incResultCode(*namespace, ct, resultCode)
 	} else {
 		for ns := range namespaces {
-			arr := n.getOrCreateResultCodeArray(ns)
-			m := n.getOrCreateResultCodeMetric(arr, ct, resultCode)
-			if cur := m.ResultCodeCounts.Get(resultCode); cur > 0 {
-				m.ResultCodeCounts.Set(resultCode, cur+1)
-			} else {
-				m.ResultCodeCounts.Set(resultCode, 1)
-			}
+			n.incResultCode(ns, ct, resultCode)
 		}
 	}
+}
+
+// incResultCode atomically increments the count for a single
+// (namespace, commandType, resultCode). The increment is done under the map's
+// single write lock (UpdateOrInsert) rather than a separate Get+Set, which both
+// halves lock acquisitions on the hot path and removes the lost-update race
+// between concurrent batchers. See issue #1001.
+func (n *nodeStats) incResultCode(namespace string, ct commandType, resultCode types.ResultCode) {
+	arr := n.getOrCreateResultCodeArray(namespace)
+	m := n.getOrCreateResultCodeMetric(arr, ct, resultCode)
+	m.ResultCodeCounts.UpdateOrInsert(resultCode, func(v uint64) uint64 { return v + 1 }, 0)
 }
