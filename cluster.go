@@ -932,9 +932,17 @@ func (clstr *Cluster) Close() {
 		// wait until tend is over
 		clstr.wgTend.Wait()
 
-		// remove node references from the partition table
-		// to allow GC to work its magic. Leaks otherwise.
-		clstr.getPartitions().cleanup()
+		// Drop the cluster's reference to the partition map so the GC can
+		// reclaim it, and the node references it holds, once any in-flight
+		// operations release their snapshot.
+		//
+		// We must NOT mutate the live map in place here. Readers such as
+		// GetNodeBatchRead hold a snapshot obtained via getPartitions() and
+		// read it without locking, relying on the copy-on-write discipline
+		// every other partition-map mutation follows (clone, mutate the clone,
+		// atomically swap the reference). Mutating the live map in place races
+		// with those readers and triggers "concurrent map read and map write".
+		clstr.setPartitions(make(partitionMap))
 	}
 }
 
