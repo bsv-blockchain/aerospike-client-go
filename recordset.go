@@ -178,6 +178,18 @@ func (rcs *Recordset) Close() Error {
 	return nil
 }
 
+// abort immediately marks the recordset inactive and closes the cancellation
+// channel, without waiting for in-flight goroutines to finish (unlike Close).
+// It is used internally to broadcast a fatal, non-retryable error (e.g. from
+// a RawRecordHandler) to all concurrently running node commands as fast as
+// possible, and is safe to call from within a node command's own goroutine.
+func (rcs *Recordset) abort() {
+	if rcs.closed.CompareAndToggle(false) {
+		rcs.active.Set(false)
+		close(rcs.cancelled)
+	}
+}
+
 func (rcs *Recordset) signalEnd() {
 	rcs.wgGoroutines.Done()
 	if rcs.goroutines.DecrementAndGet() == 0 {

@@ -39,6 +39,19 @@ type baseMultiCommand struct {
 	tracker        *partitionTracker
 	nodePartitions *nodePartitions
 
+	// rawHandler, when set, causes parseRecordResults to deliver records
+	// directly to it instead of going through a Recordset channel or the
+	// reflection-based selectCases path. See QueryPartitionsRaw.
+	rawHandler RawRecordHandler
+
+	// rawNameBuf is scratch space used by the rawHandler path to hold the
+	// current bin's name. It must be copied out of the connection's read
+	// buffer before the particle bytes are read: bufferedConn.read may shift
+	// unread bytes to the head of the (shared, reused) buffer in place,
+	// which would otherwise silently corrupt a name slice captured earlier
+	// and only used after that next read.
+	rawNameBuf [255]byte
+
 	terminationErrorType types.ResultCode
 
 	resObjType     reflect.Type
@@ -394,7 +407,64 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 
 		// if there is a recordset, process the record traditionally
 		// otherwise, it is supposed to be a record channel
-		if cmd.selectCases == nil {
+		if cmd.rawHandler != nil {
+			// Non-blocking check: a sibling node command (or this one, on a
+			// previous record) may have aborted the whole query already.
+			select {
+			case <-cmd.recordset.cancelled:
+				switch cmd.terminationErrorType {
+				case types.SCAN_TERMINATED:
+					return false, ErrScanTerminated.err().setNode(cmd.node)
+				case types.QUERY_TERMINATED:
+					return false, ErrQueryTerminated.err().setNode(cmd.node)
+				default:
+					return false, newError(cmd.terminationErrorType).setNode(cmd.node)
+				}
+			default:
+			}
+
+			if err := cmd.rawHandler.BeginRecord(key.digest[:], generation, expiration); err != nil {
+				cmd.recordset.abort()
+				return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.BeginRecord failed"))
+			}
+
+			for i := 0; i < opCount; i++ {
+				if err = cmd.readBytes(8); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+
+				opSize := int(Buffer.BytesToUint32(cmd.dataBuffer, 0))
+				particleType := int(cmd.dataBuffer[5])
+				nameSize := int(cmd.dataBuffer[7])
+
+				if err = cmd.readBytes(nameSize); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+				// Copy the name out now: the next readBytes call below may
+				// shift the shared connection buffer in place, invalidating
+				// any slice of it captured before the shift.
+				copy(cmd.rawNameBuf[:nameSize], cmd.dataBuffer[:nameSize])
+
+				particleBytesSize := opSize - (4 + nameSize)
+				if err = cmd.readBytes(particleBytesSize); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+
+				if err := cmd.rawHandler.Bin(cmd.rawNameBuf[:nameSize], particleType, cmd.dataBuffer[:particleBytesSize]); err != nil {
+					cmd.recordset.abort()
+					return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.Bin failed"))
+				}
+			}
+
+			if cmd.tracker.allowRecord(cmd.nodePartitions) {
+				if err := cmd.rawHandler.EndRecord(); err != nil {
+					cmd.recordset.abort()
+					return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.EndRecord failed"))
+				}
+			} else {
+				cmd.rawHandler.DiscardRecord()
+			}
+		} else if cmd.selectCases == nil {
 			// Parse bins.
 			var bins BinMap
 
