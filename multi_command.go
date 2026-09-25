@@ -39,6 +39,30 @@ type baseMultiCommand struct {
 	tracker        *partitionTracker
 	nodePartitions *nodePartitions
 
+	// rawHandler, when set, causes parseRecordResults to deliver records
+	// directly to it instead of going through a Recordset channel or the
+	// reflection-based selectCases path. See QueryPartitionsRaw.
+	rawHandler RawRecordHandler
+
+	// rawNameBuf is scratch space used by the rawHandler path to hold the
+	// current bin's name. It must be copied out of the connection's read
+	// buffer before the particle bytes are read: bufferedConn.read may shift
+	// unread bytes to the head of the (shared, reused) buffer in place,
+	// which would otherwise silently corrupt a name slice captured earlier
+	// and only used after that next read.
+	rawNameBuf [255]byte
+
+	// rawKey is a single Key reused across every record on the rawHandler
+	// path, to avoid allocating a *Key per record. Only its digest field is
+	// ever populated (see parseKeyDigest): the raw path has no use for
+	// namespace/setName/userKey (RawRecordHandler.BeginRecord is handed the
+	// digest directly, and partitionTracker.setLast/setDigest only read
+	// Key.digest). Reusing it is safe only because those tracker methods
+	// copy the digest bytes into their own storage instead of aliasing this
+	// array (see PartitionStatus.setDigest) -- otherwise every partition's
+	// resume digest but the last one written would be corrupted.
+	rawKey Key
+
 	terminationErrorType types.ResultCode
 
 	resObjType     reflect.Type
@@ -238,6 +262,64 @@ func (cmd *baseMultiCommand) parseKey(fieldCount int, bval *int64) (*Key, Error)
 	return &Key{namespace: namespace, setName: setName, digest: digest, userKey: userKey}, nil
 }
 
+// parseKeyDigest is the RawRecordHandler counterpart of parseKey: it reads
+// exactly the same fields off the wire (so the connection stays in sync),
+// but only extracts the digest and bval, skipping the namespace/setName
+// string allocations and the user-key value decode. This is safe because
+// the raw record path hands the digest to the caller directly (it never
+// constructs a *Key for its consumer), and partitionTracker.setLast/
+// setDigest -- the only other digest readers -- don't touch namespace,
+// setName or the user key either.
+func (cmd *baseMultiCommand) parseKeyDigest(fieldCount int, digest *[20]byte, bval *int64) Error {
+	// digest is reused across records (baseMultiCommand.rawKey); clear it so
+	// a record with no (or a short) DIGEST_RIPE field can't leak the
+	// previous record's digest instead of reading as all-zero, matching
+	// parseKey's fresh `var digest [20]byte` per call.
+	*digest = [20]byte{}
+
+	for i := 0; i < fieldCount; i++ {
+		if err := cmd.readBytes(4); err != nil {
+			return err
+		}
+
+		fieldlen := int(Buffer.BytesToUint32(cmd.dataBuffer, 0))
+		if err := cmd.readBytes(fieldlen); err != nil {
+			return err
+		}
+
+		fieldtype := FieldType(cmd.dataBuffer[0])
+		size := fieldlen - 1
+
+		switch fieldtype {
+		case DIGEST_RIPE:
+			copy(digest[:], cmd.dataBuffer[1:size+1])
+		case BVAL_ARRAY:
+			if bval != nil {
+				*bval = Buffer.LittleBytesToInt64(cmd.dataBuffer, 1)
+			}
+		}
+	}
+
+	return nil
+}
+
+// abortRawHandlerErr records a RawRecordHandler failure on the recordset
+// (broadcasting the abort to every concurrently running node command) and
+// returns the error this command itself should return.
+//
+// It deliberately builds two independent *AerospikeError instances -- one
+// stored via recordset.abort, one returned here -- rather than storing and
+// returning the same object. baseCommand.executeAt mutates whatever error a
+// command returns in place (chainErrors(err, nil) returns err itself, then
+// .iter()/.setNode()/.setInDoubt() write fields on it), and the stored
+// instance is read by every other concurrently running node command via
+// queryPartitionsRawResult/firstAbortErr. Returning the same instance a
+// sibling could be executeAt-mutating at the same time is a data race.
+func (cmd *baseMultiCommand) abortRawHandlerErr(err error, context string) Error {
+	cmd.recordset.abort(newNodeError(cmd.node, newCommonError(err, context)))
+	return newNodeError(cmd.node, newCommonError(err, context))
+}
+
 func (cmd *baseMultiCommand) parseVersion(fieldCount int) (*uint64, Error) {
 	var version *uint64
 
@@ -374,8 +456,32 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 		fieldCount := int(Buffer.BytesToUint16(cmd.dataBuffer, 18))
 		opCount := int(Buffer.BytesToUint16(cmd.dataBuffer, 20))
 
-		var bval int64
-		key, err := cmd.parseKey(fieldCount, &bval)
+		// rawBval is a plain stack variable: parseKeyDigest and setLast both
+		// provably don't retain its address, so it never allocates. bval,
+		// used by the traditional (non-raw) path below, does need to be
+		// heap-allocated: it's sent on a channel inside a *Result. It's
+		// declared as a *int64, explicitly allocated with new() only inside
+		// the non-raw branch, rather than as a plain `var bval int64` that
+		// Go's escape analysis would force onto the heap on every single
+		// call to this function -- including raw-path calls, where that
+		// branch never runs -- since escape decisions are per-declaration,
+		// not per-branch.
+		var rawBval int64
+		var bval *int64
+		var key *Key
+		var err Error
+		var bvalPtr *int64
+		if cmd.rawHandler != nil {
+			// Reuse a single per-command Key (just its digest) instead of
+			// allocating a fresh *Key for every record.
+			err = cmd.parseKeyDigest(fieldCount, &cmd.rawKey.digest, &rawBval)
+			key = &cmd.rawKey
+			bvalPtr = &rawBval
+		} else {
+			bval = new(int64)
+			key, err = cmd.parseKey(fieldCount, bval)
+			bvalPtr = bval
+		}
 		if err != nil {
 			err = newNodeError(cmd.node, err)
 			return false, err
@@ -394,7 +500,75 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 
 		// if there is a recordset, process the record traditionally
 		// otherwise, it is supposed to be a record channel
-		if cmd.selectCases == nil {
+		if cmd.rawHandler != nil {
+			// Non-blocking check: a sibling node command (or this one, on a
+			// previous record) may have aborted the whole query already.
+			select {
+			case <-cmd.recordset.cancelled:
+				// Each of these builds a fresh *AerospikeError (constAerospikeError.err()
+				// / newError() copy their receiver), never the instance stored on
+				// recordset.abortErr: queryPartitionsRawResult already gives that stored
+				// handler/ctx error priority over whatever any individual sibling command
+				// returns, so returning it here too would just be handing the SAME
+				// *AerospikeError instance back from multiple concurrently-executing
+				// commands -- executeAt mutates its returned error in place (iter/setNode/
+				// setInDoubt), which is a real data race across those siblings.
+				switch cmd.terminationErrorType {
+				case types.SCAN_TERMINATED:
+					return false, ErrScanTerminated.err().setNode(cmd.node)
+				case types.QUERY_TERMINATED:
+					return false, ErrQueryTerminated.err().setNode(cmd.node)
+				default:
+					return false, newError(cmd.terminationErrorType).setNode(cmd.node)
+				}
+			default:
+			}
+
+			if err := cmd.rawHandler.BeginRecord(key.digest[:], generation, expiration); err != nil {
+				return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.BeginRecord failed")
+			}
+
+			for i := 0; i < opCount; i++ {
+				if err = cmd.readBytes(8); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+
+				opSize := int(Buffer.BytesToUint32(cmd.dataBuffer, 0))
+				particleType := int(cmd.dataBuffer[5])
+				nameSize := int(cmd.dataBuffer[7])
+
+				if err = cmd.readBytes(nameSize); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+				// Copy the name out now: the next readBytes call below may
+				// shift the shared connection buffer in place, invalidating
+				// any slice of it captured before the shift.
+				copy(cmd.rawNameBuf[:nameSize], cmd.dataBuffer[:nameSize])
+
+				particleBytesSize := opSize - (4 + nameSize)
+				if err = cmd.readBytes(particleBytesSize); err != nil {
+					return false, newNodeError(cmd.node, err)
+				}
+
+				if err := cmd.rawHandler.Bin(cmd.rawNameBuf[:nameSize], particleType, cmd.dataBuffer[:particleBytesSize]); err != nil {
+					return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.Bin failed")
+				}
+			}
+
+			if cmd.tracker.allowRecord(cmd.nodePartitions) {
+				if err := cmd.rawHandler.EndRecord(); err != nil {
+					return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.EndRecord failed")
+				}
+			} else {
+				cmd.rawHandler.DiscardRecord()
+				// Matches the other branches' `if !allowRecord { continue }`:
+				// a discarded record must not advance this partition's
+				// resume digest/bval or count towards nodePartitions'
+				// recordCount, or the next page would resume past a record
+				// the handler never actually saw.
+				continue
+			}
+		} else if cmd.selectCases == nil {
 			// Parse bins.
 			var bins BinMap
 
@@ -448,7 +622,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			// block forever, or panic in case the channel is closed in the meantime.
 			select {
 			// send back the result on the async channel
-			case cmd.recordset.records <- &Result{Record: newRecord(cmd.node, key, bins, generation, expiration), Err: nil, BVal: &bval}:
+			case cmd.recordset.records <- &Result{Record: newRecord(cmd.node, key, bins, generation, expiration), Err: nil, BVal: bval}:
 			case <-cmd.recordset.cancelled:
 				switch cmd.terminationErrorType {
 				case types.SCAN_TERMINATED:
@@ -486,7 +660,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			if cmd.terminationErrorType == types.SCAN_TERMINATED {
 				cmd.tracker.setDigest(cmd.nodePartitions, key)
 			} else {
-				cmd.tracker.setLast(cmd.nodePartitions, key, &bval)
+				cmd.tracker.setLast(cmd.nodePartitions, key, bvalPtr)
 			}
 		}
 	}
