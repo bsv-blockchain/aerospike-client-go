@@ -456,7 +456,7 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 		gm.Expect(results).To(gm.HaveLen(expectedCount))
 	})
 
-	gg.It("QueryPartitionsRawContext returns promptly on cancellation, with no handler calls afterward", func() {
+	gg.It("QueryPartitionsRawContext returns promptly on cancellation, without draining the rest of the query", func() {
 		stm := as.NewStatement(ns, set)
 		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
 
@@ -472,6 +472,18 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 					// Cancel partway through, exactly once.
 					if calls.Load() > 20 && cancelled.CompareAndSwap(false, true) {
 						cancel()
+						// Give the ctx-watcher goroutine (running fully
+						// concurrently, not just at a Go scheduling point) a
+						// deterministic window to observe ctx.Done() and call
+						// recordset.abort() before this Bin call returns and
+						// the raw parse loop moves on to check for that
+						// abort at its next record. Without this, on a fast
+						// local single-node run the command can simply
+						// finish draining all keyCount records before the
+						// watcher goroutine is ever scheduled, making the
+						// call return nil instead of a cancellation error --
+						// the flake this sleep removes.
+						time.Sleep(50 * time.Millisecond)
 					}
 				},
 			}
@@ -487,8 +499,15 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 		// is a bound on the whole call, not a race against a real deadline.
 		gm.Expect(elapsed).To(gm.BeNumerically("<", 5*time.Second))
 
-		callsAtReturn := calls.Load()
-		gm.Consistently(func() int64 { return calls.Load() }, "100ms", "10ms").Should(gm.Equal(callsAtReturn))
+		// The real assertion that cancellation actually stopped the query
+		// early, rather than it merely happening to also return
+		// context.Canceled after draining everything: far fewer than
+		// keyCount bins were ever seen. (Checking that no further calls
+		// happen *after* QueryPartitionsRawContext returns would be vacuous:
+		// the call is fully synchronous -- it joins every node command via
+		// werrGroup.wait() before returning -- so by definition none are
+		// still running to make further calls at that point.)
+		gm.Expect(calls.Load()).To(gm.BeNumerically("<", int64(keyCount)/2))
 	})
 
 	gg.It("QueryPartitionsRawContext does not leak its context-watcher goroutine", func() {
@@ -511,6 +530,33 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 			return after
 		}, "2s", "20ms").Should(gm.BeNumerically("<=", before+2),
 			"goroutine count grew from %d to %d after 20 QueryPartitionsRawContext calls: context watcher goroutine leak?", before, after)
+	})
+
+	gg.It("an already-cancelled ctx does not mark the PartitionFilter done, and a follow-up call still delivers every record", func() {
+		stm := as.NewStatement(ns, set)
+		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
+
+		pf := as.NewPartitionFilterAll()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // already done before the call even starts
+
+		_, _, noopHandler := newCapturingRawHandlers()
+		err := client.QueryPartitionsRawContext(ctx, as.NewQueryPolicy(), stm, pf, noopHandler)
+
+		gm.Expect(err).To(gm.HaveOccurred())
+		gm.Expect(errors.Is(err, context.Canceled)).To(gm.BeTrue())
+		gm.Expect(pf.Done).To(gm.BeFalse(),
+			"an aborted round must not mark the PartitionFilter done: its partitions were never actually read")
+
+		// A follow-up call reusing the same (not-done) filter, with a live
+		// ctx this time, must still see every record -- nothing was lost by
+		// the cancelled attempt.
+		results, discarded, newHandler := newCapturingRawHandlers()
+		rawErr := client.QueryPartitionsRaw(as.NewQueryPolicy(), stm, pf, newHandler)
+		gm.Expect(rawErr).ToNot(gm.HaveOccurred())
+		gm.Expect(discarded.Load()).To(gm.BeNumerically("==", 0))
+		gm.Expect(results).To(gm.HaveLen(keyCount))
 	})
 })
 

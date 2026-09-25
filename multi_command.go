@@ -303,6 +303,23 @@ func (cmd *baseMultiCommand) parseKeyDigest(fieldCount int, digest *[20]byte, bv
 	return nil
 }
 
+// abortRawHandlerErr records a RawRecordHandler failure on the recordset
+// (broadcasting the abort to every concurrently running node command) and
+// returns the error this command itself should return.
+//
+// It deliberately builds two independent *AerospikeError instances -- one
+// stored via recordset.abort, one returned here -- rather than storing and
+// returning the same object. baseCommand.executeAt mutates whatever error a
+// command returns in place (chainErrors(err, nil) returns err itself, then
+// .iter()/.setNode()/.setInDoubt() write fields on it), and the stored
+// instance is read by every other concurrently running node command via
+// queryPartitionsRawResult/firstAbortErr. Returning the same instance a
+// sibling could be executeAt-mutating at the same time is a data race.
+func (cmd *baseMultiCommand) abortRawHandlerErr(err error, context string) Error {
+	cmd.recordset.abort(newNodeError(cmd.node, newCommonError(err, context)))
+	return newNodeError(cmd.node, newCommonError(err, context))
+}
+
 func (cmd *baseMultiCommand) parseVersion(fieldCount int) (*uint64, Error) {
 	var version *uint64
 
@@ -488,14 +505,14 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			// previous record) may have aborted the whole query already.
 			select {
 			case <-cmd.recordset.cancelled:
-				// Prefer the RawRecordHandler error that triggered the abort
-				// (if any) over a generic termination error, so that
-				// errors.Is/As against the handler's own error works no
-				// matter which concurrently aborting node command's error
-				// this query ultimately returns.
-				if abortErr := cmd.recordset.firstAbortErr(); abortErr != nil {
-					return false, abortErr
-				}
+				// Each of these builds a fresh *AerospikeError (constAerospikeError.err()
+				// / newError() copy their receiver), never the instance stored on
+				// recordset.abortErr: queryPartitionsRawResult already gives that stored
+				// handler/ctx error priority over whatever any individual sibling command
+				// returns, so returning it here too would just be handing the SAME
+				// *AerospikeError instance back from multiple concurrently-executing
+				// commands -- executeAt mutates its returned error in place (iter/setNode/
+				// setInDoubt), which is a real data race across those siblings.
 				switch cmd.terminationErrorType {
 				case types.SCAN_TERMINATED:
 					return false, ErrScanTerminated.err().setNode(cmd.node)
@@ -508,9 +525,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			}
 
 			if err := cmd.rawHandler.BeginRecord(key.digest[:], generation, expiration); err != nil {
-				abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.BeginRecord failed"))
-				cmd.recordset.abort(abortErr)
-				return false, abortErr
+				return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.BeginRecord failed")
 			}
 
 			for i := 0; i < opCount; i++ {
@@ -536,17 +551,13 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 				}
 
 				if err := cmd.rawHandler.Bin(cmd.rawNameBuf[:nameSize], particleType, cmd.dataBuffer[:particleBytesSize]); err != nil {
-					abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.Bin failed"))
-					cmd.recordset.abort(abortErr)
-					return false, abortErr
+					return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.Bin failed")
 				}
 			}
 
 			if cmd.tracker.allowRecord(cmd.nodePartitions) {
 				if err := cmd.rawHandler.EndRecord(); err != nil {
-					abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.EndRecord failed"))
-					cmd.recordset.abort(abortErr)
-					return false, abortErr
+					return false, cmd.abortRawHandlerErr(err, "RawRecordHandler.EndRecord failed")
 				}
 			} else {
 				cmd.rawHandler.DiscardRecord()

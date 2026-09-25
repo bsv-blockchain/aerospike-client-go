@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"testing"
 
 	atmc "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
@@ -119,11 +120,18 @@ func samePartitionDigests() (d1, d2 [20]byte, partitionId int) {
 // ready for parseRecordResults to be called directly without a live
 // connection.
 func newRawTestCommand(buf []byte, tracker *partitionTracker, np *nodePartitions, handler RawRecordHandler) *queryPartitionRawCommand {
+	return newRawTestCommandWithRecordset(buf, tracker, np, handler, newRecordset(0, 1))
+}
+
+// newRawTestCommandWithRecordset is newRawTestCommand, but sharing a
+// caller-supplied Recordset instead of creating a fresh one -- for tests
+// driving several concurrent "sibling" commands against the same abort
+// state.
+func newRawTestCommandWithRecordset(buf []byte, tracker *partitionTracker, np *nodePartitions, handler RawRecordHandler, recordset *Recordset) *queryPartitionRawCommand {
 	node := &Node{cluster: &Cluster{}}
 	np.node = node
 
 	statement := NewStatement("test", "set")
-	recordset := newRecordset(0, 1)
 
 	cmd := newQueryPartitionRawCommand(NewQueryPolicy(), tracker, np, statement, recordset, handler)
 	cmd.node = node
@@ -132,6 +140,25 @@ func newRawTestCommand(buf []byte, tracker *partitionTracker, np *nodePartitions
 	cmd.bc = bufferedConn{conn: conn, tail: len(buf)}
 
 	return cmd
+}
+
+// queryRecordOneBin builds a query-response record with one DIGEST_RIPE
+// field and one op/bin, as parsed by parseRecordResults' rawHandler branch.
+func queryRecordOneBin(digest []byte, binName string, particleType int, value []byte) []byte {
+	buf := queryRecordDigestOnly(digest, false)
+	binary.BigEndian.PutUint16(buf[20:22], 1) // opCount
+
+	nameLen := len(binName)
+	opSize := nameLen + len(value) + 4
+
+	op := make([]byte, 8+nameLen+len(value))
+	binary.BigEndian.PutUint32(op[0:4], uint32(opSize))
+	op[5] = byte(particleType)
+	op[7] = byte(nameLen)
+	copy(op[8:8+nameLen], binName)
+	copy(op[8+nameLen:], value)
+
+	return append(buf, op...)
 }
 
 // TestRawRecordDiscardDoesNotAdvanceResumeDigest exercises allowRecord
@@ -229,6 +256,100 @@ func TestRawKeyDigestDoesNotLeakAcrossRecords(t *testing.T) {
 	var zero [20]byte
 	if !bytes.Equal(digests[1], zero[:]) {
 		t.Errorf("record 2 (no DIGEST_RIPE field) digest = %x, want all-zero %x (leaked record 1's digest)", digests[1], zero[:])
+	}
+}
+
+// TestConcurrentAbortReturnsDistinctErrorInstances is a regression test for
+// a data race: node commands used to be able to return the exact
+// *AerospikeError instance stored on recordset.abortErr (either directly, in
+// the now-removed firstAbortErr branch of the `cancelled` select, or by
+// abort()-ing and returning the very same object). baseCommand.executeAt
+// mutates whatever error a command returns in place (chainErrors(err, nil)
+// returns err itself; .iter()/.setNode()/.setInDoubt() then write fields on
+// it) -- so multiple concurrently-running sibling commands doing that to the
+// same shared instance is a real data race.
+//
+// This is deterministic, not scheduling-dependent: it first runs one command
+// to completion to actually close recordset.cancelled, then starts several
+// more commands whose very first non-blocking cancelled-check is guaranteed
+// to already see it closed, and runs baseCommand.executeAt's exact
+// post-processing sequence on every one of their returned errors
+// concurrently, under go test -race.
+func TestConcurrentAbortReturnsDistinctErrorInstances(t *testing.T) {
+	const n = 8
+
+	digest, _, partitionId := samePartitionDigests()
+
+	tracker := &partitionTracker{
+		partitionBegin: partitionId,
+		partitions:     []*PartitionStatus{newPartitionStatus(partitionId)},
+	}
+	recordset := newRecordset(0, 1)
+
+	// First, deterministically abort the recordset by actually running a
+	// command whose handler fails.
+	abortBuf := queryRecordOneBin(digest[:], "v", 0 /* particle type irrelevant, never decoded */, []byte{0xAA})
+	abortBuf = append(abortBuf, queryEndMarker()...)
+	failErr := errors.New("boom")
+	abortHandler := &fakeRawHandler{onBin: func(name []byte, particleType int, value []byte) error { return failErr }}
+	abortCmd := newRawTestCommandWithRecordset(abortBuf, tracker, &nodePartitions{}, abortHandler, recordset)
+	if _, err := abortCmd.parseRecordResults(abortCmd, len(abortBuf)); err == nil {
+		t.Fatal("expected an error from the aborting command")
+	}
+	if recordset.IsActive() {
+		t.Fatal("expected recordset.abort to have run")
+	}
+
+	// Now start n more commands. Each one's very first record parse begins
+	// with the non-blocking `case <-cmd.recordset.cancelled` check, which is
+	// already closed, so every one of them returns an error from that branch
+	// (not from actually reading/parsing the plain record below it).
+	plainRecord := queryRecordDigestOnly(digest[:], false)
+	plainRecord = append(plainRecord, queryEndMarker()...)
+
+	cmds := make([]*queryPartitionRawCommand, n)
+	bufLen := len(plainRecord)
+	for i := range cmds {
+		buf := append([]byte(nil), plainRecord...)
+		cmds[i] = newRawTestCommandWithRecordset(buf, tracker, &nodePartitions{}, &fakeRawHandler{}, recordset)
+	}
+
+	errs := make([]Error, n)
+	var ready, start, done sync.WaitGroup
+	ready.Add(n)
+	start.Add(1)
+	done.Add(n)
+	for i := range cmds {
+		go func(i int) {
+			defer done.Done()
+			ready.Done()
+			start.Wait()
+
+			_, err := cmds[i].parseRecordResults(cmds[i], bufLen)
+			errs[i] = err
+			if err != nil {
+				// baseCommand.executeAt's exact post-processing sequence
+				// (command.go) for a non-nil, non-retried command error.
+				chainErrors(err, nil).iter(1).setNode(cmds[i].node).setInDoubt(false, 1)
+			}
+		}(i)
+	}
+	ready.Wait()
+	start.Done()
+	done.Wait()
+
+	seen := make(map[Error]int, n)
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("command %d: expected an error (recordset was already aborted)", i)
+		}
+		if err == recordset.firstAbortErr() {
+			t.Fatalf("command %d returned the exact instance stored on recordset.abortErr", i)
+		}
+		if j, dup := seen[err]; dup {
+			t.Fatalf("commands %d and %d returned the same Error instance -- baseCommand.executeAt mutates returned errors in place, so sharing one is a data race", j, i)
+		}
+		seen[err] = i
 	}
 }
 

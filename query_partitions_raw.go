@@ -17,7 +17,6 @@ package aerospike
 import (
 	"context"
 	"iter"
-	"sync"
 	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
@@ -36,14 +35,32 @@ import (
 // Returning a non-nil error from any method aborts the whole query (across
 // all nodes) as promptly as possible. The first such error is returned from
 // QueryPartitionsRaw, wrapped in an Error but recoverable via errors.Is/As.
+//
+// If a command fails partway through a record (a network error, an abort
+// from a sibling command's handler error, or ctx being done), BeginRecord
+// and some number of Bin calls may already have happened for that record
+// with neither EndRecord nor DiscardRecord following: an implementation that
+// buffers per-record state in BeginRecord must be prepared to simply discard
+// it if the query then returns an error, rather than assuming every
+// BeginRecord is eventually paired with EndRecord or DiscardRecord.
 type RawRecordHandler interface {
 	// BeginRecord is called once for every record read from the server,
 	// before any of its bins are delivered via Bin. digest is the record's
 	// 20-byte key digest, only valid for the duration of the call.
 	BeginRecord(digest []byte, generation, expiration uint32) error
 
-	// Bin is called once for every bin of the current record. name and value
-	// are only valid for the duration of the call.
+	// Bin is called once for every bin of the current record, in the order
+	// the server sends them. name and value are only valid for the duration
+	// of the call.
+	//
+	// For a Statement with Operations set, an operation that reads the same
+	// bin more than once makes the server return one result per operation,
+	// not one per bin: Bin is called once per result, with the same name
+	// repeated, in operation order. QueryPartitions' BinMap silently keeps
+	// only the last such value (query commands never set the batch/operate
+	// "isOperation" flag that would otherwise collect repeats into an
+	// OpResults slice); a RawRecordHandler sees every one of them and must
+	// decide for itself how to combine repeated names, if at all.
 	Bin(name []byte, particleType int, value []byte) error
 
 	// EndRecord is called once BeginRecord and all the Bin calls for the
@@ -84,9 +101,17 @@ func DecodeParticle(particleType int, value []byte) (any, Error) {
 // partitions, if partitionFilter is nil), delivering every record inline to a
 // RawRecordHandler created by newHandler, in the goroutine of the node
 // command that read it. Unlike QueryPartitions, there is no record channel:
-// QueryPartitionsRaw blocks until the query completes and returns nil, or
-// returns the first error encountered (either a query/network error, or an
-// error returned by the handler).
+// QueryPartitionsRaw blocks until the query completes.
+//
+// Return value: nil means every partition was successfully read, even if a
+// node-level error (TIMEOUT, NETWORK_ERROR, SERVER_NOT_AVAILABLE,
+// INDEX_NOTFOUND) along the way triggered a retry that then succeeded --
+// matching the Java client. A non-nil error means either the query's
+// retries were exhausted without reading every partition (e.g.
+// MAX_RETRIES_EXCEEDED, a timeout, or a non-retryable node error), or the
+// query was aborted by a RawRecordHandler method returning an error (that
+// error, wrapped, recoverable via errors.Is/As) or by ctx being done (see
+// QueryPartitionsRawContext).
 //
 // newHandler is called once per node command (i.e. concurrently, and
 // possibly more than once per node across retries) to create the
@@ -109,6 +134,11 @@ func (clnt *Client) QueryPartitionsRaw(policy *QueryPolicy, statement *Statement
 // Recordset.abort): node commands notice at their next record and stop
 // promptly, but not necessarily instantly (up to the current record's
 // processing, or the socket timeout if blocked on a read).
+//
+// An abort (handler error or ctx) never leaves partitionFilter.Done set on a
+// partitionFilter passed in: partitions assigned to the round that was
+// aborted are marked for retry instead, so a caller paginating with the same
+// PartitionFilter (or simply retrying it) does not silently skip them.
 //
 // The goroutine watching ctx exits (and is fully joined) before this method
 // returns, whether the query finished on its own or was cancelled: this
@@ -216,8 +246,37 @@ func (clnt *Client) queryPartitionsRaw(policy *QueryPolicy, tracker *partitionTr
 			errs = chainErrors(weg.wait(), errs)
 		}
 
+		if !recordset.IsActive() {
+			// Aborted (RawRecordHandler error or ctx) before this round ever
+			// dispatched a command (already-cancelled ctx racing this check),
+			// or partway through it (the break above, or a command aborting
+			// mid weg.wait()). Either way, this round did not run to actual
+			// completion, so isClusterComplete must not get to revise
+			// partition state as if it had: GetNodeQuery already cleared
+			// Retry for every partition assigned this round the moment they
+			// were assigned, and with partsUnavailable still 0 (an abort
+			// doesn't set it), isComplete would otherwise set
+			// PartitionFilter.Done = true / Retry = false despite those
+			// partitions never having been read -- silently losing them for
+			// any caller resuming from this filter.
+			tracker.partitionError()
+			if tracker.partitionFilter != nil {
+				tracker.partitionFilter.Done = false
+			}
+			return queryPartitionsRawResult(recordset, errs)
+		}
+
 		done, err := tracker.isClusterComplete(clnt.Cluster(), &policy.BasePolicy)
-		if !recordset.IsActive() || done || err != nil {
+		if done || err != nil {
+			// errs, at this point, only ever holds non-retryable command
+			// errors (see (*queryPartitionRawCommand).Execute: a retryable
+			// error is swallowed there once shouldRetry has marked it for
+			// retry) or isClusterComplete's own give-up error (e.g.
+			// MAX_RETRIES_EXCEEDED, a timeout). A query that read every
+			// partition, even after retrying a node error along the way,
+			// therefore correctly returns nil here -- matching the Java
+			// client -- rather than a stale error from an earlier,
+			// successfully-recovered round.
 			errs = chainErrors(err, errs)
 			if errs != nil {
 				tracker.partitionError()
@@ -289,58 +348,45 @@ func (cmd *queryPartitionRawCommand) commandType() commandType {
 // forever. The error is instead returned directly and collected by the
 // werrGroup in queryPartitionsRaw.
 //
-// Mirrors queryPartitionCommand.Execute in calling cmd.shouldRetry(err) on
-// failure: shouldRetry has the side effect (partitionTracker.
-// markRetrySequence / nodePartitions.partsUnavailable) of marking this
-// command's partitions for retry on the next round. Without it, a node-level
-// TIMEOUT/NETWORK_ERROR/SERVER_NOT_AVAILABLE/INDEX_NOTFOUND left
-// partsUnavailable at 0, so isComplete saw no unavailable partitions and
-// reported the round (and, with a PartitionFilter, the whole query via
-// pf.Done) complete despite the affected partitions never having been read.
+// Calls cmd.shouldRetry(err) on failure, like queryPartitionCommand.Execute:
+// shouldRetry has the side effect (partitionTracker.markRetrySequence /
+// nodePartitions.partsUnavailable) of marking this command's partitions for
+// retry on the next round. Without it, a node-level TIMEOUT/NETWORK_ERROR/
+// SERVER_NOT_AVAILABLE/INDEX_NOTFOUND left partsUnavailable at 0, so
+// isComplete saw no unavailable partitions and reported the round (and, with
+// a PartitionFilter, the whole query via pf.Done) complete despite the
+// affected partitions never having been read.
+//
+// Unlike queryPartitionCommand.Execute, a retryable error (shouldRetry
+// returns true) is swallowed here rather than returned: this matches the
+// Java client, and means a query that reads every partition -- even after
+// retrying a node error along the way -- reports success (a nil error from
+// QueryPartitionsRaw/QueryPartitionsRawContext), not a stale error from an
+// earlier, successfully-recovered round. A non-retryable error, or the
+// tracker itself giving up (queryPartitionsRaw's own isClusterComplete
+// error, e.g. MAX_RETRIES_EXCEEDED or a timeout), still surfaces.
 func (cmd *queryPartitionRawCommand) Execute() Error {
 	var err Error
-	if forced, ok := takeTestForceRawExecErr(); ok {
-		// Test-only: see takeTestForceRawExecErr.
-		err = forced
+	if rawExecOverride != nil {
+		// Test-only: see rawExecOverride.
+		err = rawExecOverride(cmd)
 	} else {
 		err = cmd.execute(cmd)
 	}
-	if err != nil {
-		cmd.shouldRetry(err)
+	if err != nil && cmd.shouldRetry(err) {
+		return nil
 	}
 	return err
 }
 
-// testForceRawExecErr, when armed via takeTestForceRawExecErr's setter,
-// replaces the result of the very next (*queryPartitionRawCommand).Execute
-// call across the whole process with the given error, without running
-// cmd.execute(cmd) (i.e. without touching the network) -- consumed exactly
-// once, then nil again. This lets tests verify Execute's tracker.shouldRetry
-// bookkeeping deterministically, without a real network fault or relying on
-// timing. Always nil (a single mutex-guarded pointer read) in production.
-var (
-	testForceRawExecMu  sync.Mutex
-	testForceRawExecErr Error
-)
-
-func takeTestForceRawExecErr() (Error, bool) {
-	testForceRawExecMu.Lock()
-	defer testForceRawExecMu.Unlock()
-	if testForceRawExecErr == nil {
-		return nil, false
-	}
-	err := testForceRawExecErr
-	testForceRawExecErr = nil
-	return err, true
-}
-
-// armTestForceRawExecErr arms the one-shot override consumed by
-// takeTestForceRawExecErr. Test-only.
-func armTestForceRawExecErr(err Error) {
-	testForceRawExecMu.Lock()
-	defer testForceRawExecMu.Unlock()
-	testForceRawExecErr = err
-}
+// rawExecOverride, when non-nil, replaces cmd.execute(cmd)'s result for
+// every (*queryPartitionRawCommand).Execute call, without touching the
+// network. This lets tests verify Execute's tracker.shouldRetry bookkeeping
+// deterministically, without a real network fault or relying on timing.
+// Always nil (a single, uncontended function-pointer read) in production;
+// set only from _test.go files, which must reset it via t.Cleanup so it
+// cannot leak into an unrelated test.
+var rawExecOverride func(cmd *queryPartitionRawCommand) Error
 
 func (cmd *queryPartitionRawCommand) getNamespaces() iter.Seq2[string, uint64] {
 	return nil

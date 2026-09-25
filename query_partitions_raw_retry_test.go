@@ -67,19 +67,35 @@ func (h *countingRawHandler2) EndRecord() error {
 
 func (h *countingRawHandler2) DiscardRecord() {}
 
+// setRawExecOverride arms rawExecOverride for the duration of the calling
+// test only, guaranteeing it is cleared afterward (via t.Cleanup) even if
+// the test fails or the override is never consumed, so it can never leak
+// into an unrelated test sharing the same test binary.
+func setRawExecOverride(t *testing.T, f func(cmd *queryPartitionRawCommand) Error) {
+	t.Helper()
+	rawExecOverride = f
+	t.Cleanup(func() { rawExecOverride = nil })
+}
+
 // TestQueryPartitionRawCommandExecuteRetriesNodeErrors is a regression test
 // for Execute() failing to call tracker.shouldRetry (see the comment on
-// (*queryPartitionRawCommand).Execute). It forces the very first node
-// command of a QueryPartitionsRaw call to fail with a retryable
-// (NETWORK_ERROR) error -- via the one-shot armTestForceRawExecErr hook, so
-// no real network fault or timing is involved -- and checks that the query
-// still delivers every record exactly once, because the failed round's
-// partitions get correctly retried in a second, real round against the live
-// test server.
+// (*queryPartitionRawCommand).Execute), and for QueryPartitionsRaw returning
+// a non-nil error for a query that, after retrying, actually read every
+// partition (see the comment on the `if done` branch in queryPartitionsRaw:
+// this must return nil, matching the Java client).
+//
+// It forces the very first node command of a QueryPartitionsRaw call to fail
+// with a retryable (NETWORK_ERROR) error -- via rawExecOverride, so no real
+// network fault or timing is involved -- and checks that the query still
+// delivers every record exactly once and returns nil, because the failed
+// round's partitions get correctly retried in a second, real round against
+// the live test server.
 //
 // Without the Execute() fix, the forced error's partitions are never marked
 // unavailable, isComplete reports the query done after the very first
-// (failed) round, and this test's record count comes up short.
+// (failed) round, and this test's record count comes up short. Without the
+// queryPartitionsRaw fix, rawErr is non-nil despite every record having been
+// delivered.
 func TestQueryPartitionRawCommandExecuteRetriesNodeErrors(t *testing.T) {
 	host, port := testServerHostPort()
 	clnt, err := NewClient(host, port)
@@ -115,26 +131,35 @@ func TestQueryPartitionRawCommandExecuteRetriesNodeErrors(t *testing.T) {
 		return &countingRawHandler2{mu: mu, seen: seen}
 	}
 
-	// Arm exactly one forced, retryable failure for the very next
+	// Force exactly one retryable failure, on the very first
 	// (*queryPartitionRawCommand).Execute call -- i.e. the single-node
-	// command of this query's first round.
-	armTestForceRawExecErr(newError(types.NETWORK_ERROR))
+	// command of this query's first round -- then let every subsequent call
+	// run for real.
+	var forced bool
+	var forceMu sync.Mutex
+	setRawExecOverride(t, func(cmd *queryPartitionRawCommand) Error {
+		forceMu.Lock()
+		defer forceMu.Unlock()
+		if forced {
+			return cmd.execute(cmd)
+		}
+		forced = true
+		return newError(types.NETWORK_ERROR)
+	})
 
 	policy := NewQueryPolicy()
 	rawErr := clnt.QueryPartitionsRaw(policy, stm, filter, newHandler)
 
-	// The hook must actually have been consumed by this call; otherwise the
-	// test isn't exercising anything (e.g. no node was available at all).
-	if _, stillArmed := takeTestForceRawExecErr(); stillArmed {
-		t.Fatal("forced execute error was never consumed: Execute() was not called, or no node command was constructed")
+	forceMu.Lock()
+	wasForced := forced
+	forceMu.Unlock()
+	if !wasForced {
+		t.Fatal("forced execute error was never triggered: Execute() was not called, or no node command was constructed")
 	}
 
-	// Per the executor's existing (pre-existing, shared with QueryPartitions)
-	// behavior, a query that needed a retry can return a non-nil error for
-	// its first, failed round even though a later round completed the query
-	// successfully -- so we deliberately do not assert rawErr == nil here.
-	// What must hold is that every record was still delivered, exactly once.
-	_ = rawErr
+	if rawErr != nil {
+		t.Errorf("QueryPartitionsRaw returned %v, want nil: every partition was read (after a retry), so per Java-client semantics this must report success", rawErr)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -145,5 +170,48 @@ func TestQueryPartitionRawCommandExecuteRetriesNodeErrors(t *testing.T) {
 		if c != 1 {
 			t.Errorf("record %x delivered %d times, want 1", d, c)
 		}
+	}
+}
+
+// TestQueryPartitionRawCommandExecuteNonRetryableErrorStillFails is the
+// counterpart of TestQueryPartitionRawCommandExecuteRetriesNodeErrors: a
+// node-level error that partitionTracker.shouldRetry does NOT consider
+// retryable (here, PARAMETER_ERROR) must still make QueryPartitionsRaw
+// return a non-nil error, even though -- per the fix above -- a *retried and
+// recovered* query now returns nil. The two must not be conflated.
+func TestQueryPartitionRawCommandExecuteNonRetryableErrorStillFails(t *testing.T) {
+	host, port := testServerHostPort()
+	clnt, err := NewClient(host, port)
+	if err != nil {
+		t.Skipf("no local Aerospike server at %s:%d to run this integration-level test against: %v", host, port, err)
+	}
+	defer clnt.Close()
+
+	ns := "test"
+	set := "qprretry_nonretryable"
+	if derr := clnt.Truncate(nil, ns, set, nil); derr != nil {
+		t.Fatalf("Truncate: %v", derr)
+	}
+	key, kerr := NewKey(ns, set, "k-0")
+	if kerr != nil {
+		t.Fatalf("NewKey: %v", kerr)
+	}
+	if perr := clnt.PutBins(NewWritePolicy(0, 0), key, NewBin("v", 0)); perr != nil {
+		t.Fatalf("PutBins: %v", perr)
+	}
+
+	stm := NewStatement(ns, set)
+	newHandler := func() RawRecordHandler { return &countingRawHandler2{mu: &sync.Mutex{}, seen: map[string]int{}} }
+
+	setRawExecOverride(t, func(cmd *queryPartitionRawCommand) Error {
+		return newError(types.PARAMETER_ERROR)
+	})
+
+	rawErr := clnt.QueryPartitionsRaw(NewQueryPolicy(), stm, nil, newHandler)
+	if rawErr == nil {
+		t.Fatal("expected a non-nil error: PARAMETER_ERROR is not retryable, so the query must not silently report success")
+	}
+	if !rawErr.Matches(types.PARAMETER_ERROR) {
+		t.Errorf("rawErr = %v, want it to Match PARAMETER_ERROR", rawErr)
 	}
 }
