@@ -18,6 +18,7 @@ package aerospike
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	atmc "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
@@ -41,6 +42,33 @@ type partitionTracker struct {
 	totalTimeout        time.Duration
 	iteration           int //= 1
 	deadline            time.Time
+
+	// swallowedErrMu/swallowedErr accumulate the retryable node errors that
+	// QueryPartitionsRaw's (*queryPartitionRawCommand).Execute swallows
+	// (returns nil for) once shouldRetry has marked them for a retry -- see
+	// its doc comment. Concurrent node commands across a round can all call
+	// recordSwallowedErr at once, hence the mutex. Only used by the raw
+	// query path; always nil/unused for QueryPartitions/Scan.
+	swallowedErrMu sync.Mutex
+	swallowedErr   Error
+}
+
+// recordSwallowedErr accumulates err (via chainErrors, so at minimum every
+// recorded error's own ResultCode/message/Node survives, and the very first
+// one's full wrapped chain does too) for later attachment to the tracker's
+// eventual give-up error, if any -- see takeSwallowedErr.
+func (pt *partitionTracker) recordSwallowedErr(err Error) {
+	pt.swallowedErrMu.Lock()
+	defer pt.swallowedErrMu.Unlock()
+	pt.swallowedErr = chainErrors(err, pt.swallowedErr)
+}
+
+// takeSwallowedErr returns every error accumulated by recordSwallowedErr so
+// far, chained together, or nil if none were recorded.
+func (pt *partitionTracker) takeSwallowedErr() Error {
+	pt.swallowedErrMu.Lock()
+	defer pt.swallowedErrMu.Unlock()
+	return pt.swallowedErr
 }
 
 func newPartitionTrackerForNodes(policy *MultiPolicy, nodes []*Node) *partitionTracker {

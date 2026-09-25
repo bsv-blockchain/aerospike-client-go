@@ -155,6 +155,17 @@ func (clnt *Client) QueryPartitionsRawContext(ctx context.Context, policy *Query
 		return ErrClusterIsEmpty.err()
 	}
 
+	// Check synchronously, before touching partitionFilter at all: an
+	// already-cancelled ctx would otherwise only be caught by the watcher
+	// goroutine below racing the query's very first IsActive check, which
+	// (rarely, but possibly, on a fast local round-trip) can lose that race
+	// and let the query run to completion instead of aborting. This path
+	// never reads or writes partitionFilter, so there is nothing to correct
+	// there: its Done/Retry state is exactly as the caller left it.
+	if err := ctx.Err(); err != nil {
+		return newCommonError(err, "QueryPartitionsRawContext: context already done")
+	}
+
 	var tracker *partitionTracker
 	if partitionFilter == nil {
 		tracker = newPartitionTrackerForNodes(&policy.MultiPolicy, nodes)
@@ -171,23 +182,27 @@ func (clnt *Client) QueryPartitionsRawContext(ctx context.Context, policy *Query
 	// dereferences recordset.objChan.
 	recordset := newRecordset(0, 1)
 
-	stopWatching := make(chan struct{})
-	watcherDone := make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		select {
-		case <-ctx.Done():
-			recordset.abort(newCommonError(ctx.Err(), "QueryPartitionsRawContext: context done"))
-		case <-stopWatching:
-		}
-	}()
+	// ctx.Done() returns nil for context.Background()/context.TODO() (i.e.
+	// every plain QueryPartitionsRaw call) and never fires: skip spawning a
+	// goroutine and its channels to watch it.
+	if done := ctx.Done(); done != nil {
+		stopWatching := make(chan struct{})
+		watcherDone := make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			select {
+			case <-done:
+				recordset.abort(newCommonError(ctx.Err(), "QueryPartitionsRawContext: context done"))
+			case <-stopWatching:
+			}
+		}()
+		defer func() {
+			close(stopWatching)
+			<-watcherDone
+		}()
+	}
 
-	err := clnt.queryPartitionsRaw(policy, tracker, statement, recordset, newHandler)
-
-	close(stopWatching)
-	<-watcherDone
-
-	return err
+	return clnt.queryPartitionsRaw(policy, tracker, statement, recordset, newHandler)
 }
 
 // queryPartitionsRawResult picks the Error that a queryPartitionsRaw call
@@ -267,26 +282,55 @@ func (clnt *Client) queryPartitionsRaw(policy *QueryPolicy, tracker *partitionTr
 		}
 
 		done, err := tracker.isClusterComplete(clnt.Cluster(), &policy.BasePolicy)
-		if done || err != nil {
-			// errs, at this point, only ever holds non-retryable command
-			// errors (see (*queryPartitionRawCommand).Execute: a retryable
-			// error is swallowed there once shouldRetry has marked it for
-			// retry) or isClusterComplete's own give-up error (e.g.
-			// MAX_RETRIES_EXCEEDED, a timeout). A query that read every
-			// partition, even after retrying a node error along the way,
-			// therefore correctly returns nil here -- matching the Java
+		if err != nil {
+			// The tracker itself gave up (e.g. MAX_RETRIES_EXCEEDED, a
+			// timeout). Chain in whatever retryable node errors Execute
+			// swallowed along the way (see partitionTracker.
+			// recordSwallowedErr), so the caller sees at least one node +
+			// cause instead of a bare give-up error with no context.
+			err = chainErrors(err, tracker.takeSwallowedErr())
+			errs = chainErrors(err, errs)
+			tracker.partitionError()
+			if tracker.partitionFilter != nil {
+				tracker.partitionFilter.Done = false
+			}
+			return queryPartitionsRawResult(recordset, errs)
+		}
+		if done {
+			// errs here can only be a non-retryable command error (a
+			// retryable one is swallowed by Execute once shouldRetry has
+			// marked it for retry -- see its doc comment): a query that read
+			// every partition, even after retrying a node error along the
+			// way, therefore correctly returns nil here -- matching the Java
 			// client -- rather than a stale error from an earlier,
 			// successfully-recovered round.
-			errs = chainErrors(err, errs)
 			if errs != nil {
 				tracker.partitionError()
+				// A non-retryable command error leaves partsUnavailable at 0
+				// (shouldRetry's side effect never ran for it), so
+				// isComplete's partsUnavailable==0 branch above still
+				// reported done=true despite the query having failed. Force
+				// Done=false here too, so "an error was returned" reliably
+				// implies "not Done", matching the abort branch above.
+				if tracker.partitionFilter != nil {
+					tracker.partitionFilter.Done = false
+				}
 			}
 			return queryPartitionsRawResult(recordset, errs)
 		}
 
 		if policy.SleepBetweenRetries > 0 {
-			// Sleep before trying again.
-			time.Sleep(interval)
+			// Sleep before trying again, but return early if the query is
+			// aborted (ctx done, or a handler error from some earlier round)
+			// while waiting: recordset.cancelled is closed by abort(), and a
+			// QueryPartitionsRawContext ctx cancellation reaches it via
+			// exactly that path. Otherwise, a cancellation during backoff
+			// would sit unnoticed for the rest of the (possibly
+			// exponentially-growing) interval.
+			select {
+			case <-time.After(interval):
+			case <-recordset.cancelled:
+			}
 
 			if policy.SleepMultiplier > 1 {
 				interval = time.Duration(float64(interval) * policy.SleepMultiplier)
@@ -374,6 +418,11 @@ func (cmd *queryPartitionRawCommand) Execute() Error {
 		err = cmd.execute(cmd)
 	}
 	if err != nil && cmd.shouldRetry(err) {
+		// Swallowed here, but not forgotten: record it so that if the
+		// tracker eventually gives up (MAX_RETRIES_EXCEEDED, a timeout), the
+		// caller still sees at least one node + cause instead of a bare
+		// give-up error. If the retry succeeds instead, nothing reads this.
+		cmd.tracker.recordSwallowedErr(err)
 		return nil
 	}
 	return err

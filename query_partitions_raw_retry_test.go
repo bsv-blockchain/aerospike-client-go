@@ -15,11 +15,13 @@
 package aerospike
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 )
@@ -179,6 +181,13 @@ func TestQueryPartitionRawCommandExecuteRetriesNodeErrors(t *testing.T) {
 // retryable (here, PARAMETER_ERROR) must still make QueryPartitionsRaw
 // return a non-nil error, even though -- per the fix above -- a *retried and
 // recovered* query now returns nil. The two must not be conflated.
+//
+// It also guards P2-2: a non-retryable command error leaves
+// nodePartitions.partsUnavailable at 0 (shouldRetry's side effect never ran
+// for it), so isClusterComplete's partsUnavailable==0 branch still reports
+// done=true despite the query having failed. filter.Done must be forced back
+// to false in that case too, the same as the abort path already does, so
+// "an error was returned" reliably implies "not Done".
 func TestQueryPartitionRawCommandExecuteNonRetryableErrorStillFails(t *testing.T) {
 	host, port := testServerHostPort()
 	clnt, err := NewClient(host, port)
@@ -201,17 +210,120 @@ func TestQueryPartitionRawCommandExecuteNonRetryableErrorStillFails(t *testing.T
 	}
 
 	stm := NewStatement(ns, set)
+	filter := NewPartitionFilterAll()
 	newHandler := func() RawRecordHandler { return &countingRawHandler2{mu: &sync.Mutex{}, seen: map[string]int{}} }
 
 	setRawExecOverride(t, func(cmd *queryPartitionRawCommand) Error {
 		return newError(types.PARAMETER_ERROR)
 	})
 
-	rawErr := clnt.QueryPartitionsRaw(NewQueryPolicy(), stm, nil, newHandler)
+	rawErr := clnt.QueryPartitionsRaw(NewQueryPolicy(), stm, filter, newHandler)
 	if rawErr == nil {
 		t.Fatal("expected a non-nil error: PARAMETER_ERROR is not retryable, so the query must not silently report success")
 	}
 	if !rawErr.Matches(types.PARAMETER_ERROR) {
 		t.Errorf("rawErr = %v, want it to Match PARAMETER_ERROR", rawErr)
+	}
+	if filter.Done {
+		t.Error("filter.Done = true, want false: a non-retryable node error means this partition range was never actually read")
+	}
+}
+
+// TestQueryPartitionsRawExhaustedRetriesReturnsErrorWithCause is a guard
+// test for the "must still error" half of the retry contract (see
+// TestQueryPartitionRawCommandExecuteRetriesNodeErrors for the "retry then
+// success returns nil" half), for both MaxRetries == 0 and > 0: a query
+// whose every attempt fails with a retryable error must give up with
+// MAX_RETRIES_EXCEEDED, must not silently report success, must leave
+// partitionFilter.Done false (nothing was actually read), and -- per the
+// P2-1 fix -- that error must still let the caller reach the swallowed
+// retryable errors' own cause via errors.Is/As, not a bare
+// "max retries exceeded" with no node or cause attached.
+func TestQueryPartitionsRawExhaustedRetriesReturnsErrorWithCause(t *testing.T) {
+	for _, maxRetries := range []int{0, 3} {
+		t.Run(fmt.Sprintf("MaxRetries=%d", maxRetries), func(t *testing.T) {
+			host, port := testServerHostPort()
+			clnt, err := NewClient(host, port)
+			if err != nil {
+				t.Skipf("no local Aerospike server at %s:%d to run this integration-level test against: %v", host, port, err)
+			}
+			defer clnt.Close()
+
+			ns := "test"
+			set := fmt.Sprintf("qprexhausted%d", maxRetries)
+			stm := NewStatement(ns, set)
+			filter := NewPartitionFilterAll()
+
+			sentinel := errors.New("always fails")
+			setRawExecOverride(t, func(cmd *queryPartitionRawCommand) Error {
+				return newErrorAndWrap(sentinel, types.NETWORK_ERROR)
+			})
+
+			policy := NewQueryPolicy()
+			policy.MaxRetries = maxRetries
+			policy.SleepBetweenRetries = time.Millisecond // keep the loop fast
+			newHandler := func() RawRecordHandler {
+				return &countingRawHandler2{mu: &sync.Mutex{}, seen: map[string]int{}}
+			}
+
+			rawErr := clnt.QueryPartitionsRaw(policy, stm, filter, newHandler)
+
+			if rawErr == nil {
+				t.Fatal("expected a non-nil error when retries are exhausted, got nil")
+			}
+			if !rawErr.Matches(types.MAX_RETRIES_EXCEEDED) {
+				t.Errorf("rawErr = %v, want it to Match MAX_RETRIES_EXCEEDED", rawErr)
+			}
+			if !errors.Is(rawErr, sentinel) {
+				t.Errorf("rawErr = %v, want errors.Is(rawErr, sentinel) true: the swallowed retryable errors' cause must survive to the give-up error", rawErr)
+			}
+			if filter.Done {
+				t.Error("filter.Done = true, want false: retries were exhausted, so this partition range was never actually read")
+			}
+		})
+	}
+}
+
+// TestQueryPartitionsRawTotalTimeoutReturnsTimeout is the TotalTimeout
+// counterpart of TestQueryPartitionsRawExhaustedRetriesReturnsErrorWithCause:
+// a query whose every attempt fails with a retryable error, and that never
+// hits MaxRetries because TotalTimeout expires first, must return a TIMEOUT
+// error, not nil.
+func TestQueryPartitionsRawTotalTimeoutReturnsTimeout(t *testing.T) {
+	host, port := testServerHostPort()
+	clnt, err := NewClient(host, port)
+	if err != nil {
+		t.Skipf("no local Aerospike server at %s:%d to run this integration-level test against: %v", host, port, err)
+	}
+	defer clnt.Close()
+
+	ns := "test"
+	set := "qprtimeout"
+	stm := NewStatement(ns, set)
+
+	setRawExecOverride(t, func(cmd *queryPartitionRawCommand) Error {
+		return newError(types.NETWORK_ERROR)
+	})
+
+	policy := NewQueryPolicy()
+	policy.MaxRetries = 100000 // effectively unbounded: TotalTimeout must fire first
+	policy.TotalTimeout = 50 * time.Millisecond
+	policy.SleepBetweenRetries = 5 * time.Millisecond
+	newHandler := func() RawRecordHandler {
+		return &countingRawHandler2{mu: &sync.Mutex{}, seen: map[string]int{}}
+	}
+
+	start := time.Now()
+	rawErr := clnt.QueryPartitionsRaw(policy, stm, nil, newHandler)
+	elapsed := time.Since(start)
+
+	if rawErr == nil {
+		t.Fatal("expected a TIMEOUT error, got nil")
+	}
+	if !rawErr.Matches(types.TIMEOUT) {
+		t.Errorf("rawErr = %v, want it to Match TIMEOUT", rawErr)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v to give up, want well under 5s given a 50ms TotalTimeout", elapsed)
 	}
 }
