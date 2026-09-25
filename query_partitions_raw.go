@@ -56,6 +56,26 @@ type RawRecordHandler interface {
 	DiscardRecord()
 }
 
+// DecodeParticle decodes a raw bin value as delivered to a RawRecordHandler's
+// Bin method (particleType, value) into the same Go value that
+// QueryPartitions/Query would have put in the corresponding Record.Bins
+// entry. It is a convenience for RawRecordHandler implementations that want
+// to decode occasional complex bins (maps, lists, etc.) without
+// reimplementing the wire's msgpack format themselves; simple bins (int,
+// string, bool, blob, float) can just as easily be decoded inline by the
+// handler.
+//
+// value must be a slice previously passed to Bin, or a copy of one; it is
+// not retained.
+//
+// DecodeParticle always decodes MAP/LIST bins (matching the default
+// QueryPolicy.RawCDT == false behavior). A query run with RawCDT == true
+// returns MAP/LIST bins undecoded, as a RawBlobValue, in QueryPartitions'
+// own BinMap; DecodeParticle does not reproduce that -- it always decodes.
+func DecodeParticle(particleType int, value []byte) (any, Error) {
+	return bytesToParticle(particleType, value, 0, len(value))
+}
+
 // QueryPartitionsRaw executes a query for the specified partitions (or all
 // partitions, if partitionFilter is nil), delivering every record inline to a
 // RawRecordHandler created by newHandler, in the goroutine of the node

@@ -17,6 +17,7 @@ package aerospike_test
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -160,6 +161,26 @@ func (h *countingRawHandler) EndRecord() error {
 
 func (h *countingRawHandler) DiscardRecord() {}
 
+// decodeParticleHandler forwards every (name, particleType, value) triple of
+// the record(s) it sees to onBin, for tests that want to run values through
+// as.DecodeParticle themselves.
+type decodeParticleHandler struct {
+	onBin func(name string, particleType int, value []byte)
+}
+
+func (h *decodeParticleHandler) BeginRecord(digest []byte, generation, expiration uint32) error {
+	return nil
+}
+
+func (h *decodeParticleHandler) Bin(name []byte, particleType int, value []byte) error {
+	h.onBin(string(name), particleType, value)
+	return nil
+}
+
+func (h *decodeParticleHandler) EndRecord() error { return nil }
+
+func (h *decodeParticleHandler) DiscardRecord() {}
+
 var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 
 	var ns = *namespace
@@ -295,5 +316,132 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 
 		gm.Expect(discarded.Load()).To(gm.BeNumerically("==", 0))
 		gm.Expect(results).To(gm.HaveLen(keyCount))
+	})
+
+	gg.It("DecodeParticle decodes list bins the same way QueryPartitions' BinMap does", func() {
+		dpSet := randString(50)
+		key, err := as.NewKey(ns, dpSet, "decode-particle")
+		gm.Expect(err).ToNot(gm.HaveOccurred())
+
+		intList := []any{1, 2, 3, 4, 5, math.MaxInt32}
+		byteList := []any{[]byte{0x01, 0x02, 0x03}, []byte{0xFF, 0xFE}, []byte{}}
+
+		gm.Expect(client.PutBins(wpolicy, key,
+			as.NewBin("IntList", intList),
+			as.NewBin("ByteList", byteList),
+			as.NewBin("DPFilter", 1),
+		)).ToNot(gm.HaveOccurred())
+
+		dpIndexName := dpSet + "DPFilter"
+		createIndex(wpolicy, ns, dpSet, dpIndexName, "DPFilter", as.NUMERIC)
+		defer func() {
+			gm.Expect(client.DropIndex(nil, ns, dpSet, dpIndexName)).ToNot(gm.HaveOccurred())
+		}()
+
+		stm := as.NewStatement(ns, dpSet)
+		stm.SetFilter(as.NewRangeFilter("DPFilter", 1, 1))
+
+		// Reference: QueryPartitions' own decoded BinMap.
+		refRecordset, refErr := client.QueryPartitions(as.NewQueryPolicy(), stm, nil)
+		gm.Expect(refErr).ToNot(gm.HaveOccurred())
+
+		var expectedIntList, expectedByteList any
+		found := false
+		for res := range refRecordset.Results() {
+			gm.Expect(res.Err).ToNot(gm.HaveOccurred())
+			expectedIntList = res.Record.Bins["IntList"]
+			expectedByteList = res.Record.Bins["ByteList"]
+			found = true
+		}
+		gm.Expect(found).To(gm.BeTrue())
+
+		// Actual: raw particle bytes run through as.DecodeParticle.
+		var gotIntList, gotByteList any
+		gotFound := false
+
+		newHandler := func() as.RawRecordHandler {
+			return &decodeParticleHandler{
+				onBin: func(name string, particleType int, value []byte) {
+					v, derr := as.DecodeParticle(particleType, value)
+					gm.Expect(derr).ToNot(gm.HaveOccurred())
+					switch name {
+					case "IntList":
+						gotIntList = v
+						gotFound = true
+					case "ByteList":
+						gotByteList = v
+						gotFound = true
+					}
+				},
+			}
+		}
+
+		rawErr := client.QueryPartitionsRaw(as.NewQueryPolicy(), stm, nil, newHandler)
+		gm.Expect(rawErr).ToNot(gm.HaveOccurred())
+
+		gm.Expect(gotFound).To(gm.BeTrue())
+		gm.Expect(gotIntList).To(gm.Equal(expectedIntList))
+		gm.Expect(gotByteList).To(gm.Equal(expectedByteList))
+	})
+
+	gg.It("resumes correctly across paginated calls sharing a PartitionFilter (exercises the per-command reused Key's resume digest)", func() {
+		stm := as.NewStatement(ns, set)
+		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
+
+		// All partitions, small MaxRecords: this deterministically forces
+		// keyCount/MaxRecords pages (~40 here) regardless of how this run's
+		// random key digests happen to be distributed across partitions
+		// (unlike restricting to a handful of partitions up front, whose
+		// record count -- and therefore whether pagination happens at all --
+		// would depend on that same random distribution). With that many
+		// pages over only 4096 partitions, at least some pages are
+		// overwhelmingly likely to contain multiple records for the same
+		// partition, processed back to back by a single node command --
+		// exactly the scenario in which reusing one Key struct across
+		// records (instead of allocating a fresh one per record) would have
+		// corrupted every partition's resume digest but the last one
+		// written, had partitionTracker.setLast/setDigest still aliased the
+		// Key's backing array instead of copying it (see
+		// PartitionStatus.setDigest).
+		pf := as.NewPartitionFilterAll()
+
+		results, discarded, newHandler := newCapturingRawHandlers()
+
+		pages := 0
+		for {
+			pages++
+			gm.Expect(pages).To(gm.BeNumerically("<", 1000), "pagination did not converge")
+
+			policy := as.NewQueryPolicy()
+			policy.MaxRecords = 50 // force many small pages, many resumes
+			rawErr := client.QueryPartitionsRaw(policy, stm, pf, newHandler)
+			gm.Expect(rawErr).ToNot(gm.HaveOccurred())
+
+			if pf.Done {
+				break
+			}
+		}
+
+		gm.Expect(pages).To(gm.BeNumerically(">", 1),
+			"test is only meaningful if pagination actually spans multiple calls")
+		gm.Expect(discarded.Load()).To(gm.BeNumerically("==", 0))
+
+		// Ground truth: every record QueryPartitions (unpaginated) sees for
+		// the same filter.
+		refRecordset, err := client.QueryPartitions(as.NewQueryPolicy(), stm, nil)
+		gm.Expect(err).ToNot(gm.HaveOccurred())
+		expectedCount := 0
+		for res := range refRecordset.Results() {
+			gm.Expect(res.Err).ToNot(gm.HaveOccurred())
+			expectedCount++
+		}
+
+		// If the resume digest had been corrupted, this would show up as
+		// either duplicates (capturingRawHandler.EndRecord errors on a
+		// digest seen twice, which would have surfaced as rawErr above) or
+		// missing records (fewer results than expectedCount, because a
+		// later page skipped past records past some other record's wrongly
+		// "resumed from" digest).
+		gm.Expect(results).To(gm.HaveLen(expectedCount))
 	})
 })

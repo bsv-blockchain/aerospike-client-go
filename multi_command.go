@@ -52,6 +52,17 @@ type baseMultiCommand struct {
 	// and only used after that next read.
 	rawNameBuf [255]byte
 
+	// rawKey is a single Key reused across every record on the rawHandler
+	// path, to avoid allocating a *Key per record. Only its digest field is
+	// ever populated (see parseKeyDigest): the raw path has no use for
+	// namespace/setName/userKey (RawRecordHandler.BeginRecord is handed the
+	// digest directly, and partitionTracker.setLast/setDigest only read
+	// Key.digest). Reusing it is safe only because those tracker methods
+	// copy the digest bytes into their own storage instead of aliasing this
+	// array (see PartitionStatus.setDigest) -- otherwise every partition's
+	// resume digest but the last one written would be corrupted.
+	rawKey Key
+
 	terminationErrorType types.ResultCode
 
 	resObjType     reflect.Type
@@ -251,6 +262,41 @@ func (cmd *baseMultiCommand) parseKey(fieldCount int, bval *int64) (*Key, Error)
 	return &Key{namespace: namespace, setName: setName, digest: digest, userKey: userKey}, nil
 }
 
+// parseKeyDigest is the RawRecordHandler counterpart of parseKey: it reads
+// exactly the same fields off the wire (so the connection stays in sync),
+// but only extracts the digest and bval, skipping the namespace/setName
+// string allocations and the user-key value decode. This is safe because
+// the raw record path hands the digest to the caller directly (it never
+// constructs a *Key for its consumer), and partitionTracker.setLast/
+// setDigest -- the only other digest readers -- don't touch namespace,
+// setName or the user key either.
+func (cmd *baseMultiCommand) parseKeyDigest(fieldCount int, digest *[20]byte, bval *int64) Error {
+	for i := 0; i < fieldCount; i++ {
+		if err := cmd.readBytes(4); err != nil {
+			return err
+		}
+
+		fieldlen := int(Buffer.BytesToUint32(cmd.dataBuffer, 0))
+		if err := cmd.readBytes(fieldlen); err != nil {
+			return err
+		}
+
+		fieldtype := FieldType(cmd.dataBuffer[0])
+		size := fieldlen - 1
+
+		switch fieldtype {
+		case DIGEST_RIPE:
+			copy(digest[:], cmd.dataBuffer[1:size+1])
+		case BVAL_ARRAY:
+			if bval != nil {
+				*bval = Buffer.LittleBytesToInt64(cmd.dataBuffer, 1)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (cmd *baseMultiCommand) parseVersion(fieldCount int) (*uint64, Error) {
 	var version *uint64
 
@@ -387,8 +433,32 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 		fieldCount := int(Buffer.BytesToUint16(cmd.dataBuffer, 18))
 		opCount := int(Buffer.BytesToUint16(cmd.dataBuffer, 20))
 
-		var bval int64
-		key, err := cmd.parseKey(fieldCount, &bval)
+		// rawBval is a plain stack variable: parseKeyDigest and setLast both
+		// provably don't retain its address, so it never allocates. bval,
+		// used by the traditional (non-raw) path below, does need to be
+		// heap-allocated: it's sent on a channel inside a *Result. It's
+		// declared as a *int64, explicitly allocated with new() only inside
+		// the non-raw branch, rather than as a plain `var bval int64` that
+		// Go's escape analysis would force onto the heap on every single
+		// call to this function -- including raw-path calls, where that
+		// branch never runs -- since escape decisions are per-declaration,
+		// not per-branch.
+		var rawBval int64
+		var bval *int64
+		var key *Key
+		var err Error
+		var bvalPtr *int64
+		if cmd.rawHandler != nil {
+			// Reuse a single per-command Key (just its digest) instead of
+			// allocating a fresh *Key for every record.
+			err = cmd.parseKeyDigest(fieldCount, &cmd.rawKey.digest, &rawBval)
+			key = &cmd.rawKey
+			bvalPtr = &rawBval
+		} else {
+			bval = new(int64)
+			key, err = cmd.parseKey(fieldCount, bval)
+			bvalPtr = bval
+		}
 		if err != nil {
 			err = newNodeError(cmd.node, err)
 			return false, err
@@ -518,7 +588,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			// block forever, or panic in case the channel is closed in the meantime.
 			select {
 			// send back the result on the async channel
-			case cmd.recordset.records <- &Result{Record: newRecord(cmd.node, key, bins, generation, expiration), Err: nil, BVal: &bval}:
+			case cmd.recordset.records <- &Result{Record: newRecord(cmd.node, key, bins, generation, expiration), Err: nil, BVal: bval}:
 			case <-cmd.recordset.cancelled:
 				switch cmd.terminationErrorType {
 				case types.SCAN_TERMINATED:
@@ -556,7 +626,7 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			if cmd.terminationErrorType == types.SCAN_TERMINATED {
 				cmd.tracker.setDigest(cmd.nodePartitions, key)
 			} else {
-				cmd.tracker.setLast(cmd.nodePartitions, key, &bval)
+				cmd.tracker.setLast(cmd.nodePartitions, key, bvalPtr)
 			}
 		}
 	}

@@ -162,7 +162,14 @@ func (pt *partitionTracker) initPartitions(policy *MultiPolicy, partitionCount i
 	}
 
 	if digest != nil {
-		partsAll[0].Digest = digest
+		// Copy rather than alias the caller-supplied digest (typically a
+		// PartitionFilter's own Digest field, itself often an alias of a
+		// user's *Key.digest -- see NewPartitionFilterByKey): setLast/
+		// setDigest below reuse and mutate PartitionStatus.Digest's backing
+		// array in place once it's their own, which would otherwise
+		// corrupt the caller's Key/PartitionFilter the first time a record
+		// is read for this partition.
+		partsAll[0].setDigest(digest)
 	}
 
 	return partsAll
@@ -279,7 +286,9 @@ func (pt *partitionTracker) partitionUnavailable(nodePartitions *nodePartitions,
 
 func (pt *partitionTracker) setDigest(nodePartitions *nodePartitions, key *Key) {
 	partitionId := key.PartitionId()
-	pt.partitions[partitionId-pt.partitionBegin].Digest = key.Digest()
+	// Copy rather than alias key.Digest()'s backing array: see
+	// PartitionStatus.setDigest.
+	pt.partitions[partitionId-pt.partitionBegin].setDigest(key.digest[:])
 
 	nodePartitions.recordCount++
 }
@@ -290,7 +299,9 @@ func (pt *partitionTracker) setLast(nodePartitions *nodePartitions, key *Key, bv
 		panic(fmt.Sprintf("Partition mismatch: key.partitionId: %d, partitionBegin: %d", partitionId, pt.partitionBegin))
 	}
 	ps := pt.partitions[partitionId-pt.partitionBegin]
-	ps.Digest = key.digest[:]
+	// Copy rather than alias key.digest's backing array: see
+	// PartitionStatus.setDigest.
+	ps.setDigest(key.digest[:])
 	if bval != nil {
 		ps.BVal = *bval
 	}
