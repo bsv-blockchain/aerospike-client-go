@@ -15,7 +15,9 @@
 package aerospike
 
 import (
+	"context"
 	"iter"
+	"sync"
 	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
@@ -51,8 +53,10 @@ type RawRecordHandler interface {
 	EndRecord() error
 
 	// DiscardRecord is called instead of EndRecord when the partition
-	// tracker rejects the record, e.g. because its partition was already
-	// completed in a previous round, or because MaxRecords was reached.
+	// tracker rejects the record because the query's MaxRecords limit has
+	// already been reached. A discarded record does not advance this
+	// partition's resume position: it (or a record after it, depending on
+	// server-side ordering) will be delivered again on a subsequent page.
 	DiscardRecord()
 }
 
@@ -90,7 +94,26 @@ func DecodeParticle(particleType int, value []byte) (any, Error) {
 //
 // This method is only supported by Aerospike 4.9+ servers.
 // If the policy is nil, the default relevant policy will be used.
+//
+// QueryPartitionsRaw is a thin wrapper around QueryPartitionsRawContext using
+// context.Background(): it cannot be aborted except by a RawRecordHandler
+// error. Use QueryPartitionsRawContext to also support external
+// cancellation/deadlines.
 func (clnt *Client) QueryPartitionsRaw(policy *QueryPolicy, statement *Statement, partitionFilter *PartitionFilter, newHandler func() RawRecordHandler) Error {
+	return clnt.QueryPartitionsRawContext(context.Background(), policy, statement, partitionFilter, newHandler)
+}
+
+// QueryPartitionsRawContext is QueryPartitionsRaw that also aborts the query
+// when ctx is done, returning an Error that errors.Is ctx.Err(). Cancellation
+// is delivered through the same path as a RawRecordHandler error (see
+// Recordset.abort): node commands notice at their next record and stop
+// promptly, but not necessarily instantly (up to the current record's
+// processing, or the socket timeout if blocked on a read).
+//
+// The goroutine watching ctx exits (and is fully joined) before this method
+// returns, whether the query finished on its own or was cancelled: this
+// never leaks a goroutine regardless of ctx's own lifetime.
+func (clnt *Client) QueryPartitionsRawContext(ctx context.Context, policy *QueryPolicy, statement *Statement, partitionFilter *PartitionFilter, newHandler func() RawRecordHandler) Error {
 	policy = clnt.getUsableQueryPolicy(policy)
 
 	if newHandler == nil {
@@ -118,7 +141,37 @@ func (clnt *Client) QueryPartitionsRaw(policy *QueryPolicy, statement *Statement
 	// dereferences recordset.objChan.
 	recordset := newRecordset(0, 1)
 
-	return clnt.queryPartitionsRaw(policy, tracker, statement, recordset, newHandler)
+	stopWatching := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			recordset.abort(newCommonError(ctx.Err(), "QueryPartitionsRawContext: context done"))
+		case <-stopWatching:
+		}
+	}()
+
+	err := clnt.queryPartitionsRaw(policy, tracker, statement, recordset, newHandler)
+
+	close(stopWatching)
+	<-watcherDone
+
+	return err
+}
+
+// queryPartitionsRawResult picks the Error that a queryPartitionsRaw call
+// should return: a RawRecordHandler error recorded via Recordset.abort always
+// takes priority over errs (the chainErrors-aggregated node/cluster errors
+// from this call), regardless of the order in which concurrently aborting
+// node commands happened to finish. See abortErr's docs on objectset
+// (recordset.go) for why relying on chainErrors alone for this is
+// order-dependent and can silently drop the handler's error from the chain.
+func queryPartitionsRawResult(recordset *Recordset, errs Error) Error {
+	if abortErr := recordset.firstAbortErr(); abortErr != nil {
+		return abortErr
+	}
+	return errs
 }
 
 // queryPartitionsRaw mirrors queryPartitions (query_executor.go): same
@@ -138,7 +191,7 @@ func (clnt *Client) queryPartitionsRaw(policy *QueryPolicy, tracker *partitionTr
 		if err != nil {
 			errs = chainErrors(err, errs)
 			tracker.partitionError()
-			return errs
+			return queryPartitionsRawResult(recordset, errs)
 		}
 
 		maxConcurrentNodes := policy.MaxConcurrentNodes
@@ -149,6 +202,14 @@ func (clnt *Client) queryPartitionsRaw(policy *QueryPolicy, tracker *partitionTr
 		if recordset.IsActive() {
 			weg := newWeightedErrGroup(maxConcurrentNodes)
 			for _, nodePartition := range list {
+				// With MaxConcurrentNodes < len(list), an abort (e.g. from a
+				// RawRecordHandler error on an already-dispatched command)
+				// should stop further dispatches from this round, not start
+				// every remaining node command only to have each one
+				// connect, read a record, and immediately terminate.
+				if !recordset.IsActive() {
+					break
+				}
 				cmd := newQueryPartitionRawCommand(policy, tracker, nodePartition, statement, recordset, newHandler())
 				weg.execute(cmd)
 			}
@@ -161,7 +222,7 @@ func (clnt *Client) queryPartitionsRaw(policy *QueryPolicy, tracker *partitionTr
 			if errs != nil {
 				tracker.partitionError()
 			}
-			return errs
+			return queryPartitionsRawResult(recordset, errs)
 		}
 
 		if policy.SleepBetweenRetries > 0 {
@@ -227,8 +288,58 @@ func (cmd *queryPartitionRawCommand) commandType() commandType {
 // for a raw query (there is no consumer goroutine), so doing so could block
 // forever. The error is instead returned directly and collected by the
 // werrGroup in queryPartitionsRaw.
+//
+// Mirrors queryPartitionCommand.Execute in calling cmd.shouldRetry(err) on
+// failure: shouldRetry has the side effect (partitionTracker.
+// markRetrySequence / nodePartitions.partsUnavailable) of marking this
+// command's partitions for retry on the next round. Without it, a node-level
+// TIMEOUT/NETWORK_ERROR/SERVER_NOT_AVAILABLE/INDEX_NOTFOUND left
+// partsUnavailable at 0, so isComplete saw no unavailable partitions and
+// reported the round (and, with a PartitionFilter, the whole query via
+// pf.Done) complete despite the affected partitions never having been read.
 func (cmd *queryPartitionRawCommand) Execute() Error {
-	return cmd.execute(cmd)
+	var err Error
+	if forced, ok := takeTestForceRawExecErr(); ok {
+		// Test-only: see takeTestForceRawExecErr.
+		err = forced
+	} else {
+		err = cmd.execute(cmd)
+	}
+	if err != nil {
+		cmd.shouldRetry(err)
+	}
+	return err
+}
+
+// testForceRawExecErr, when armed via takeTestForceRawExecErr's setter,
+// replaces the result of the very next (*queryPartitionRawCommand).Execute
+// call across the whole process with the given error, without running
+// cmd.execute(cmd) (i.e. without touching the network) -- consumed exactly
+// once, then nil again. This lets tests verify Execute's tracker.shouldRetry
+// bookkeeping deterministically, without a real network fault or relying on
+// timing. Always nil (a single mutex-guarded pointer read) in production.
+var (
+	testForceRawExecMu  sync.Mutex
+	testForceRawExecErr Error
+)
+
+func takeTestForceRawExecErr() (Error, bool) {
+	testForceRawExecMu.Lock()
+	defer testForceRawExecMu.Unlock()
+	if testForceRawExecErr == nil {
+		return nil, false
+	}
+	err := testForceRawExecErr
+	testForceRawExecErr = nil
+	return err, true
+}
+
+// armTestForceRawExecErr arms the one-shot override consumed by
+// takeTestForceRawExecErr. Test-only.
+func armTestForceRawExecErr(err Error) {
+	testForceRawExecMu.Lock()
+	defer testForceRawExecMu.Unlock()
+	testForceRawExecErr = err
 }
 
 func (cmd *queryPartitionRawCommand) getNamespaces() iter.Seq2[string, uint64] {

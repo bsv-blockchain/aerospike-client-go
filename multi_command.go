@@ -271,6 +271,12 @@ func (cmd *baseMultiCommand) parseKey(fieldCount int, bval *int64) (*Key, Error)
 // setDigest -- the only other digest readers -- don't touch namespace,
 // setName or the user key either.
 func (cmd *baseMultiCommand) parseKeyDigest(fieldCount int, digest *[20]byte, bval *int64) Error {
+	// digest is reused across records (baseMultiCommand.rawKey); clear it so
+	// a record with no (or a short) DIGEST_RIPE field can't leak the
+	// previous record's digest instead of reading as all-zero, matching
+	// parseKey's fresh `var digest [20]byte` per call.
+	*digest = [20]byte{}
+
 	for i := 0; i < fieldCount; i++ {
 		if err := cmd.readBytes(4); err != nil {
 			return err
@@ -482,6 +488,14 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			// previous record) may have aborted the whole query already.
 			select {
 			case <-cmd.recordset.cancelled:
+				// Prefer the RawRecordHandler error that triggered the abort
+				// (if any) over a generic termination error, so that
+				// errors.Is/As against the handler's own error works no
+				// matter which concurrently aborting node command's error
+				// this query ultimately returns.
+				if abortErr := cmd.recordset.firstAbortErr(); abortErr != nil {
+					return false, abortErr
+				}
 				switch cmd.terminationErrorType {
 				case types.SCAN_TERMINATED:
 					return false, ErrScanTerminated.err().setNode(cmd.node)
@@ -494,8 +508,9 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 			}
 
 			if err := cmd.rawHandler.BeginRecord(key.digest[:], generation, expiration); err != nil {
-				cmd.recordset.abort()
-				return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.BeginRecord failed"))
+				abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.BeginRecord failed"))
+				cmd.recordset.abort(abortErr)
+				return false, abortErr
 			}
 
 			for i := 0; i < opCount; i++ {
@@ -521,18 +536,26 @@ func (cmd *baseMultiCommand) parseRecordResults(ifc command, receiveSize int) (b
 				}
 
 				if err := cmd.rawHandler.Bin(cmd.rawNameBuf[:nameSize], particleType, cmd.dataBuffer[:particleBytesSize]); err != nil {
-					cmd.recordset.abort()
-					return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.Bin failed"))
+					abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.Bin failed"))
+					cmd.recordset.abort(abortErr)
+					return false, abortErr
 				}
 			}
 
 			if cmd.tracker.allowRecord(cmd.nodePartitions) {
 				if err := cmd.rawHandler.EndRecord(); err != nil {
-					cmd.recordset.abort()
-					return false, newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.EndRecord failed"))
+					abortErr := newNodeError(cmd.node, newCommonError(err, "RawRecordHandler.EndRecord failed"))
+					cmd.recordset.abort(abortErr)
+					return false, abortErr
 				}
 			} else {
 				cmd.rawHandler.DiscardRecord()
+				// Matches the other branches' `if !allowRecord { continue }`:
+				// a discarded record must not advance this partition's
+				// resume digest/bval or count towards nodePartitions'
+				// recordCount, or the next page would resume past a record
+				// the handler never actually saw.
+				continue
 			}
 		} else if cmd.selectCases == nil {
 			// Parse bins.

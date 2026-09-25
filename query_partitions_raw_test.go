@@ -15,11 +15,14 @@
 package aerospike_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	as "github.com/bsv-blockchain/aerospike-client-go/v8"
 	ptype "github.com/bsv-blockchain/aerospike-client-go/v8/types/particle_type"
@@ -284,23 +287,31 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 	})
 
 	gg.It("aborts and returns the handler's error", func() {
-		stm := as.NewStatement(ns, set)
-		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
+		// Default MaxConcurrentNodes (all nodes run concurrently): on this
+		// single-node test cluster that still means one command per round,
+		// but must not rely on the MaxConcurrentNodes=1 restriction that
+		// used to pin this test to a single in-flight command -- see
+		// TestQueryPartitionsRawResultPrefersHandlerErrorRegardlessOfOrder
+		// for the deterministic, order-covering version of this assertion.
+		// Repeated a few times for extra confidence.
+		for i := 0; i < 10; i++ {
+			stm := as.NewStatement(ns, set)
+			stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
 
-		sentinel := errors.New("boom")
-		failAfter := &atomic.Int64{}
-		failAfter.Store(50)
+			sentinel := errors.New("boom")
+			failAfter := &atomic.Int64{}
+			failAfter.Store(50)
 
-		newHandler := func() as.RawRecordHandler {
-			return &errorRawHandler{failAfter: failAfter, sentinel: sentinel}
+			newHandler := func() as.RawRecordHandler {
+				return &errorRawHandler{failAfter: failAfter, sentinel: sentinel}
+			}
+
+			policy := as.NewQueryPolicy()
+			err := client.QueryPartitionsRaw(policy, stm, nil, newHandler)
+
+			gm.Expect(err).To(gm.HaveOccurred())
+			gm.Expect(errors.Is(err, sentinel)).To(gm.BeTrue(), "iteration %d", i)
 		}
-
-		policy := as.NewQueryPolicy()
-		policy.MaxConcurrentNodes = 1
-		err := client.QueryPartitionsRaw(policy, stm, nil, newHandler)
-
-		gm.Expect(err).To(gm.HaveOccurred())
-		gm.Expect(errors.Is(err, sentinel)).To(gm.BeTrue())
 	})
 
 	gg.It("respects MaxConcurrentNodes without breaking delivery", func() {
@@ -444,4 +455,84 @@ var _ = gg.Describe("QueryPartitionsRaw operations", func() {
 		// "resumed from" digest).
 		gm.Expect(results).To(gm.HaveLen(expectedCount))
 	})
+
+	gg.It("QueryPartitionsRawContext returns promptly on cancellation, with no handler calls afterward", func() {
+		stm := as.NewStatement(ns, set)
+		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var calls atomic.Int64
+		var cancelled atomic.Bool
+		newHandler := func() as.RawRecordHandler {
+			return &cancelingRawHandler{
+				calls: &calls,
+				onBin: func() {
+					// Cancel partway through, exactly once.
+					if calls.Load() > 20 && cancelled.CompareAndSwap(false, true) {
+						cancel()
+					}
+				},
+			}
+		}
+
+		start := time.Now()
+		err := client.QueryPartitionsRawContext(ctx, as.NewQueryPolicy(), stm, nil, newHandler)
+		elapsed := time.Since(start)
+
+		gm.Expect(err).To(gm.HaveOccurred())
+		gm.Expect(errors.Is(err, context.Canceled)).To(gm.BeTrue())
+		// Well under what fully draining keyCount records would take: this
+		// is a bound on the whole call, not a race against a real deadline.
+		gm.Expect(elapsed).To(gm.BeNumerically("<", 5*time.Second))
+
+		callsAtReturn := calls.Load()
+		gm.Consistently(func() int64 { return calls.Load() }, "100ms", "10ms").Should(gm.Equal(callsAtReturn))
+	})
+
+	gg.It("QueryPartitionsRawContext does not leak its context-watcher goroutine", func() {
+		stm := as.NewStatement(ns, set)
+		stm.SetFilter(as.NewRangeFilter("BinFilter", 0, keyCount-1))
+
+		before := runtime.NumGoroutine()
+
+		for i := 0; i < 20; i++ {
+			_, discarded, newHandler := newCapturingRawHandlers()
+			err := client.QueryPartitionsRawContext(context.Background(), as.NewQueryPolicy(), stm, nil, newHandler)
+			gm.Expect(err).ToNot(gm.HaveOccurred())
+			gm.Expect(discarded.Load()).To(gm.BeNumerically("==", 0))
+		}
+
+		runtime.GC()
+		var after int
+		gm.Eventually(func() int {
+			after = runtime.NumGoroutine()
+			return after
+		}, "2s", "20ms").Should(gm.BeNumerically("<=", before+2),
+			"goroutine count grew from %d to %d after 20 QueryPartitionsRawContext calls: context watcher goroutine leak?", before, after)
+	})
 })
+
+// cancelingRawHandler counts every Bin call and invokes onBin after each one,
+// for tests driving external cancellation from inside a handler callback.
+type cancelingRawHandler struct {
+	calls *atomic.Int64
+	onBin func()
+}
+
+func (h *cancelingRawHandler) BeginRecord(digest []byte, generation, expiration uint32) error {
+	return nil
+}
+
+func (h *cancelingRawHandler) Bin(name []byte, particleType int, value []byte) error {
+	h.calls.Add(1)
+	if h.onBin != nil {
+		h.onBin()
+	}
+	return nil
+}
+
+func (h *cancelingRawHandler) EndRecord() error { return nil }
+
+func (h *cancelingRawHandler) DiscardRecord() {}
