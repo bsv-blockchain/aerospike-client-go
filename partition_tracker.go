@@ -18,6 +18,7 @@ package aerospike
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	atmc "github.com/bsv-blockchain/aerospike-client-go/v8/internal/atomic"
@@ -41,6 +42,33 @@ type partitionTracker struct {
 	totalTimeout        time.Duration
 	iteration           int //= 1
 	deadline            time.Time
+
+	// swallowedErrMu/swallowedErr accumulate the retryable node errors that
+	// QueryPartitionsRaw's (*queryPartitionRawCommand).Execute swallows
+	// (returns nil for) once shouldRetry has marked them for a retry -- see
+	// its doc comment. Concurrent node commands across a round can all call
+	// recordSwallowedErr at once, hence the mutex. Only used by the raw
+	// query path; always nil/unused for QueryPartitions/Scan.
+	swallowedErrMu sync.Mutex
+	swallowedErr   Error
+}
+
+// recordSwallowedErr accumulates err (via chainErrors, so at minimum every
+// recorded error's own ResultCode/message/Node survives, and the very first
+// one's full wrapped chain does too) for later attachment to the tracker's
+// eventual give-up error, if any -- see takeSwallowedErr.
+func (pt *partitionTracker) recordSwallowedErr(err Error) {
+	pt.swallowedErrMu.Lock()
+	defer pt.swallowedErrMu.Unlock()
+	pt.swallowedErr = chainErrors(err, pt.swallowedErr)
+}
+
+// takeSwallowedErr returns every error accumulated by recordSwallowedErr so
+// far, chained together, or nil if none were recorded.
+func (pt *partitionTracker) takeSwallowedErr() Error {
+	pt.swallowedErrMu.Lock()
+	defer pt.swallowedErrMu.Unlock()
+	return pt.swallowedErr
 }
 
 func newPartitionTrackerForNodes(policy *MultiPolicy, nodes []*Node) *partitionTracker {
@@ -162,7 +190,14 @@ func (pt *partitionTracker) initPartitions(policy *MultiPolicy, partitionCount i
 	}
 
 	if digest != nil {
-		partsAll[0].Digest = digest
+		// Copy rather than alias the caller-supplied digest (typically a
+		// PartitionFilter's own Digest field, itself often an alias of a
+		// user's *Key.digest -- see NewPartitionFilterByKey): setLast/
+		// setDigest below reuse and mutate PartitionStatus.Digest's backing
+		// array in place once it's their own, which would otherwise
+		// corrupt the caller's Key/PartitionFilter the first time a record
+		// is read for this partition.
+		partsAll[0].setDigest(digest)
 	}
 
 	return partsAll
@@ -279,7 +314,9 @@ func (pt *partitionTracker) partitionUnavailable(nodePartitions *nodePartitions,
 
 func (pt *partitionTracker) setDigest(nodePartitions *nodePartitions, key *Key) {
 	partitionId := key.PartitionId()
-	pt.partitions[partitionId-pt.partitionBegin].Digest = key.Digest()
+	// Copy rather than alias key.Digest()'s backing array: see
+	// PartitionStatus.setDigest.
+	pt.partitions[partitionId-pt.partitionBegin].setDigest(key.digest[:])
 
 	nodePartitions.recordCount++
 }
@@ -290,7 +327,9 @@ func (pt *partitionTracker) setLast(nodePartitions *nodePartitions, key *Key, bv
 		panic(fmt.Sprintf("Partition mismatch: key.partitionId: %d, partitionBegin: %d", partitionId, pt.partitionBegin))
 	}
 	ps := pt.partitions[partitionId-pt.partitionBegin]
-	ps.Digest = key.digest[:]
+	// Copy rather than alias key.digest's backing array: see
+	// PartitionStatus.setDigest.
+	ps.setDigest(key.digest[:])
 	if bval != nil {
 		ps.BVal = *bval
 	}

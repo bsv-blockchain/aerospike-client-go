@@ -56,6 +56,18 @@ type objectset struct {
 
 	chanLock sync.Mutex
 
+	// abortErrMu/abortErr record the *first* error passed to abort, e.g. from
+	// a RawRecordHandler (see baseMultiCommand.parseRecordResults). Used by
+	// QueryPartitionsRaw to return an error that reliably errors.Is/As the
+	// handler's own error, regardless of which of possibly several
+	// concurrently aborting node commands happens to return first: relying on
+	// chainErrors for this is order-dependent, since chainErrors(outer,
+	// inner) always keeps outer's own wrapped chain and simply overwrites its
+	// tail with inner, so an unlucky ordering can silently drop the handler
+	// error out of the chain entirely.
+	abortErrMu sync.Mutex
+	abortErr   Error
+
 	taskID uint64
 }
 
@@ -176,6 +188,36 @@ func (rcs *Recordset) Close() Error {
 	rcs.wgGoroutines.Wait()
 
 	return nil
+}
+
+// abort immediately marks the recordset inactive and closes the cancellation
+// channel, without waiting for in-flight goroutines to finish (unlike Close).
+// It is used internally to broadcast a fatal, non-retryable error (e.g. from
+// a RawRecordHandler) to all concurrently running node commands as fast as
+// possible, and is safe to call from within a node command's own goroutine.
+//
+// err is recorded (the first call's err wins) and can be retrieved via
+// firstAbortErr, regardless of which of possibly several concurrent callers
+// gets here first -- see abortErr's docs on objectset.
+func (rcs *Recordset) abort(err Error) {
+	rcs.abortErrMu.Lock()
+	if rcs.abortErr == nil {
+		rcs.abortErr = err
+	}
+	rcs.abortErrMu.Unlock()
+
+	if rcs.closed.CompareAndToggle(false) {
+		rcs.active.Set(false)
+		close(rcs.cancelled)
+	}
+}
+
+// firstAbortErr returns the error passed to the first call to abort, or nil
+// if abort was never called.
+func (rcs *Recordset) firstAbortErr() Error {
+	rcs.abortErrMu.Lock()
+	defer rcs.abortErrMu.Unlock()
+	return rcs.abortErr
 }
 
 func (rcs *Recordset) signalEnd() {

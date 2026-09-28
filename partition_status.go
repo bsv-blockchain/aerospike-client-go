@@ -40,6 +40,22 @@ func newPartitionStatus(id int) *PartitionStatus {
 	return &PartitionStatus{Id: id, Retry: true}
 }
 
+// setDigest copies digest into ps's own Digest buffer, reusing the existing
+// backing array when it is already large enough. This is deliberately a copy
+// rather than a re-slice of the caller's backing array: callers on the hot
+// (raw record) path reuse a single Key across many records to avoid
+// per-record allocations, and that Key's digest array is overwritten in
+// place on the very next record. Aliasing it here would silently corrupt
+// every partition's resume digest except the last one written.
+func (ps *PartitionStatus) setDigest(digest []byte) {
+	if cap(ps.Digest) < len(digest) {
+		ps.Digest = make([]byte, len(digest))
+	} else {
+		ps.Digest = ps.Digest[:len(digest)]
+	}
+	copy(ps.Digest, digest)
+}
+
 func (ps *PartitionStatus) String() string {
 	r := 'F'
 	if ps.Retry {
